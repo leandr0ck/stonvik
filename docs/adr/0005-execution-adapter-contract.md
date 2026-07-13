@@ -42,16 +42,16 @@ El contrato incluye:
 - aislamiento y timeouts responsabilidad del adapter concreto;
 - ninguna transición de estado ni autoaprobación dentro del adapter.
 
-Se implementan un `DeterministicExecutionAdapter` para tests y fixtures y un
+Se implementan un `DeterministicExecutionAdapter` para tests y fixtures, un
 adapter opt-in para Pi mediante su protocolo RPC documentado (`pi --mode rpc
---no-session`). El adapter Pi solo maneja perfiles `direct`; el adapter
-específico de `pi-spec-flow` queda fuera hasta verificar la extensión/API
-instalada y definir su configuración explícita.
+--no-session`) y un adapter específico para `pi-spec-flow`. Este último está
+definido en [ADR 0006](0006-pi-spec-flow-adapter.md) y solo se activa con
+`--engine pi-spec-flow`.
 
 ## Consecuencias
 
 - El core puede probarse sin Pi, red o procesos externos.
 - `run` puede detenerse con `engine_unavailable` sin mover una Feature.
 - Añadir otro motor real no requiere duplicar reglas de dominio.
-- La integración `pi-spec-flow` necesita una decisión posterior sobre su
-  extensión/API, permisos, aislamiento y cancelación.
+- La integración `pi-spec-flow` conserva una frontera explícita sobre permisos,
+  aislamiento, cancelación y estado estructurado.

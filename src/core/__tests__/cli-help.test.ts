@@ -13,6 +13,9 @@ describe("CLI command surface", () => {
     expect(stdout).toContain("triage");
     expect(stdout).toContain("run");
     expect(stdout).toContain("feature");
+
+    const { stdout: runHelp } = await execFile(process.execPath, [tsx, cliPath, "run", "--help"], { cwd: process.cwd() });
+    expect(runHelp).toContain("pi-spec-flow");
   });
 
   it("exposes verification under Feature help", async () => {
@@ -23,4 +26,3 @@ describe("CLI command surface", () => {
     expect(stdout).toContain("verify");
   });
 });
-

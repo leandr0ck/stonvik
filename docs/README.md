@@ -7,6 +7,7 @@
 - [ADR 0003 — Contrato de `forgium run`](adr/0003-forgium-run-contract.md)
 - [ADR 0004 — Verificación, review y receipts](adr/0004-verification-review-and-receipts.md)
 - [ADR 0005 — Contrato de `ExecutionAdapter`](adr/0005-execution-adapter-contract.md)
+- [ADR 0006 — Adaptador `pi-spec-flow` mediante RPC](adr/0006-pi-spec-flow-adapter.md)
 
 ## Planes
 
