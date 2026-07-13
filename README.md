@@ -229,6 +229,7 @@ A completed Feature cannot be moved to another state through the CLI. Use Featur
 | `forgium inbox` | List Inbox items. |
 | `forgium triage [--non-interactive] [--edit] [--dry-run]` | Resolve Drafts and triage captured Inbox items. |
 | `forgium run [--max-features <n> | --until-empty] [--engine pi|pi-spec-flow]` | Run the bounded repository loop. Agent execution is opt-in. |
+| `npm run test:e2e:pi` | Run the opt-in real Pi + `pi-spec-flow` smoke test using Pi's configured default model. |
 | `forgium status` | Show counts by Inbox, Draft, and Feature state. |
 | `forgium validate` | Validate required directories and Inbox/Draft/Feature file schemas. Returns exit code `2` when invalid. |
 | `forgium feature create ...` | Create a ready Feature. |

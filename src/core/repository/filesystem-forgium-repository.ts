@@ -266,7 +266,8 @@ export class FilesystemForgiumRepository {
     if (!adapter) return { outcome: "needs_human", feature: ready, summary: "No execution adapter is available for this Feature." };
 
     const doing = await this.startFeature(id);
-    const result = await adapter.execute({ ...request, feature: doing });
+    const activeProfile = await this.inspectExecutionMode(id);
+    const result = await adapter.execute({ ...request, feature: doing, profile: activeProfile });
     await this.persistReceipt(doing, this.createExecutionReceipt(doing, runId, adapter.id, result));
     if (result.outcome === "completed") {
       const verification = await this.verifyFeature(id, { runId });

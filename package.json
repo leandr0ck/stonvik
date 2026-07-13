@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "dev": "tsx src/cli/index.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:e2e:pi": "FORGIUM_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-e2e.test.ts --testTimeout=600000"
   },
   "dependencies": {
     "commander": "^12.1.0",
