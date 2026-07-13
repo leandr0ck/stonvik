@@ -1,8 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { FilesystemForgiumRepository } from "../../core/index.js";
+
+const execFile = promisify(execFileCallback);
 
 async function tempRepo() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-test-"));
@@ -13,10 +17,24 @@ async function tempRepo() {
 }
 
 describe("FilesystemForgiumRepository", () => {
+  it("initializes and captures work outside a Git repository", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-no-git-test-"));
+    const cli = path.resolve(process.cwd(), "src/cli/index.ts");
+    const tsx = path.resolve(process.cwd(), "node_modules/tsx/dist/cli.mjs");
+
+    await execFile(process.execPath, [tsx, cli, "init"], { cwd: root });
+    const { stdout } = await execFile(process.execPath, [tsx, cli, "capture", "Create an example file"], { cwd: root });
+
+    expect(stdout).toContain("Captured inbox-");
+    await expect(fs.readdir(path.join(root, "product/inbox"))).resolves.toHaveLength(1);
+  });
+
   it("initializes required directories", async () => {
     const { root } = await tempRepo();
     await expect(fs.stat(path.join(root, "product/inbox"))).resolves.toBeTruthy();
     await expect(fs.stat(path.join(root, "features/ready"))).resolves.toBeTruthy();
+    await expect(fs.readFile(path.join(root, ".gitignore"), "utf8")).resolves.toContain(".forgium/runtime/");
+    await expect(fs.stat(path.join(root, ".forgium"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("captures and parses inbox items", async () => {
@@ -30,19 +48,20 @@ describe("FilesystemForgiumRepository", () => {
   });
 
   it("creates features and transitions through the default lifecycle", async () => {
-    const { repo } = await tempRepo();
+    const { root, repo } = await tempRepo();
     const feature = await repo.createFeature({ title: "Add WhatsApp Button", goal: "Add a storefront contact button.", acceptance: ["Button is visible"] });
     expect(feature.state).toBe("ready");
     expect((await repo.getStatus()).features.ready).toBe(1);
 
     const doing = await repo.startFeature(feature.id);
     expect(doing.state).toBe("doing");
+    await expect(fs.readdir(path.join(root, ".forgium/runtime/runs"))).resolves.toHaveLength(1);
     expect(await repo.inspectExecutionMode(feature.id)).toEqual({ kind: "direct" });
 
     const review = await repo.submitForReview(feature.id);
     expect(review.state).toBe("review");
 
-    const done = await repo.completeFeature(feature.id);
+    const done = await repo.reviewFeature(feature.id, "approved", "Reviewed in test.");
     expect(done.state).toBe("done");
   });
 

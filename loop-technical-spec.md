@@ -1,11 +1,28 @@
-# Technical Specification — Loop
+# Technical Specification — Forgium
 
 **Status:** Draft v0.1  
 **Date:** 2026-07-09  
 **Target runtime:** Node.js + TypeScript  
 **Primary agent runtime:** Pi Coding Agent  
 **Existing execution engine integration:** `pi-spec-flow`  
-**Working name:** `Loop`
+**Product name:** `Forgium` (previously `Loop`)
+
+---
+
+## 0. Decision records
+
+This specification is the original v0.1 design baseline. The following ADRs
+are the normative source for decisions made after it was written; when they
+conflict with an earlier section of this document, the ADR takes precedence.
+
+- [ADR 0001: Loop architecture](docs/adr/0001-loop-architecture.md)
+- [ADR 0002: Drafts and lifecycle artifacts](docs/adr/0002-draft-state-and-artifacts.md)
+- [ADR 0003: `forgium run` contract](docs/adr/0003-forgium-run-contract.md)
+- [ADR 0004: Verification, review, and receipts](docs/adr/0004-verification-review-and-receipts.md)
+
+In particular, Forgium has one operational entry point (`forgium run`), keeps
+incomplete work in `features/draft/`, and requires persisted verification and
+review evidence before a Feature can reach `done`.
 
 ---
 
@@ -212,6 +229,8 @@ The canonical product lifecycle is:
 ```text
 Inbox Item
    ↓
+Draft
+   ↓
 Feature
    ↓
 Done
@@ -235,6 +254,7 @@ Specs and Tickets are artifacts of a Feature, not separate top-level entities in
 │   └── roadmap.md
 │
 └── features/
+    ├── draft/
     ├── ready/
     ├── doing/
     ├── review/
@@ -515,13 +535,8 @@ review  → blocked
 blocked → ready
 ```
 
-Direct transition:
-
-```text
-doing → done
-```
-
-may be supported as an explicit configuration option, but should not be the default.
+Direct transition from `doing` to `done` is not supported. A Feature must enter
+`review` and have a recorded review decision before it can be completed.
 
 ---
 
@@ -1457,7 +1472,7 @@ Even if v0.1 runs one Feature at a time, the data model should avoid obvious con
 When a Feature moves to `doing`, create:
 
 ```text
-.loop-lock.json
+.forgium-lock.json
 ```
 
 inside the Feature directory.
@@ -1480,23 +1495,23 @@ Alternative:
 Store runtime leases under:
 
 ```text
-.loop/runtime/
+.forgium/runtime/
 ```
 
 Recommended for v0.1:
 
 ```text
-.loop/runtime/runs/
+.forgium/runtime/runs/
 ```
 
 so runtime locks do not pollute Feature history.
 
-Repository-persistent state remains in Git; ephemeral process state lives in `.loop/runtime/`.
+Repository-persistent state remains in Git; ephemeral process state lives in `.forgium/runtime/`.
 
 Suggested `.gitignore`:
 
 ```gitignore
-.loop/runtime/
+.forgium/runtime/
 ```
 
 ---

@@ -1,5 +1,5 @@
 node_modules/
 dist/
-.loop/runtime/
+.forgium/runtime/
 *.tmp
 .spec-flow/

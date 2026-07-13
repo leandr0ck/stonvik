@@ -4,10 +4,12 @@ Forgium is a repository-native workflow engine for software-development agents. 
 
 The repository is the source of truth. Forgium does not require a database or a hosted service.
 
+Technical decisions and the staged implementation plan live in [docs/](docs/README.md).
+
 ## Requirements
 
 - Node.js 20 or later
-- A Git repository (recommended; required when Forgium needs to discover the project root automatically)
+- Git (optional; when present, Forgium uses it to discover the project root automatically)
 
 ## Install
 
@@ -68,6 +70,7 @@ product/
 └── inbox/                  # Raw, untriaged requests
 
 features/
+├── draft/                  # Propuestas incompletas o pendientes de aprobación
 ├── ready/                  # Approved work waiting to start
 ├── doing/                  # Work in progress
 ├── review/                 # Work awaiting review
@@ -75,7 +78,7 @@ features/
 └── done/                   # Completed work
 ```
 
-It also adds `.loop/runtime/` to `.gitignore`. Runtime leases created when work starts are local process metadata; the Inbox and Feature directories are intended to be committed to Git.
+It also adds `.forgium/runtime/` to `.gitignore`. Runtime leases created when work starts are local process metadata; the Inbox and Feature directories are intended to be committed to Git. The runtime directory is created only when it is needed.
 
 Each Feature is a directory containing at least a `manifest.yaml`. You can add supporting artifacts to that directory, such as `spec.md`, `tickets/`, `notes.md`, or `research.md`.
 
@@ -221,11 +224,13 @@ A completed Feature cannot be moved to another state through the CLI. Use Featur
 
 | Command | Purpose |
 | --- | --- |
-| `forgium init` | Initialize the Inbox and Feature state directories. |
+| `forgium init` | Initialize the Inbox, Draft, and Feature state directories. |
 | `forgium capture [text...]` | Save a raw Inbox item. Reads piped standard input when no text is supplied. |
 | `forgium inbox` | List Inbox items. |
-| `forgium status` | Show counts by Inbox and Feature state. |
-| `forgium validate` | Validate required directories and Inbox/Feature file schemas. Returns exit code `2` when invalid. |
+| `forgium triage [--non-interactive] [--edit] [--dry-run]` | Resolve Drafts and triage captured Inbox items. |
+| `forgium run [--max-features <n> | --until-empty]` | Run the bounded repository loop. |
+| `forgium status` | Show counts by Inbox, Draft, and Feature state. |
+| `forgium validate` | Validate required directories and Inbox/Draft/Feature file schemas. Returns exit code `2` when invalid. |
 | `forgium feature create ...` | Create a ready Feature. |
 | `forgium feature list [--state <state>]` | List Features, optionally filtering by `ready`, `doing`, `review`, `blocked`, or `done`. |
 | `forgium feature start <id>` | Move `ready` → `doing`. |
@@ -234,6 +239,7 @@ A completed Feature cannot be moved to another state through the CLI. Use Featur
 | `forgium feature block <id> --reason <reason>` | Move `doing` or `review` → `blocked` and record the reason. |
 | `forgium feature unblock <id>` | Move `blocked` → `ready`. |
 | `forgium feature profile <id>` | Show whether a Feature is direct or `pi-spec-flow` work. |
+| `forgium feature verify <id>` | Run configured checks and record a verification receipt. |
 | `forgium work` | Start the next ready Feature and show its execution profile. |
 | `forgium review <id> [--fail \| --block <reason>]` | Complete a Feature in review, return it to `doing`, or block it. |
 
