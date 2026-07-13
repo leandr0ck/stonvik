@@ -7,3 +7,4 @@ export * from "./services/spec-flow-commands.js";
 export * from "./schemas/draft.schema.js";
 export * from "./schemas/receipt.schema.js";
 export * from "./execution/execution-adapter.js";
+export * from "./execution/pi-rpc-execution-adapter.js";

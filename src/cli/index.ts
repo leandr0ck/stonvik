@@ -3,7 +3,7 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { Command } from "commander";
-import { EditorUnavailableError, FilesystemForgiumRepository, ForgiumError, InvalidDraftError, RunOptionsInvalidError, findRepositoryRoot, type Draft, type FeatureState } from "../core/index.js";
+import { EditorUnavailableError, ExecutionAdapterRegistry, FilesystemForgiumRepository, ForgiumError, InvalidDraftError, PiRpcExecutionAdapter, RunOptionsInvalidError, findRepositoryRoot, type Draft, type FeatureState } from "../core/index.js";
 
 interface GlobalOptions { root?: string; json?: boolean }
 
@@ -58,10 +58,11 @@ program.command("run")
   .description("Run the bounded repository workflow loop")
   .option("--max-features <n>", "maximum number of Features", (value: string) => value)
   .option("--until-empty", "continue until no eligible work remains")
+  .option("--engine <engine>", "execution engine (pi)")
   .option("--non-interactive", "never prompt or approve captured Inbox items")
   .option("--edit", "open each Draft in the configured editor")
   .option("--dry-run", "show planned actions without writing")
-  .action(async (opts: { maxFeatures?: string; untilEmpty?: boolean; nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }) => {
+  .action(async (opts: { maxFeatures?: string; untilEmpty?: boolean; engine?: string; nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }) => {
     const repo = await repoForCommand();
     let interrupted = false;
     const onInterrupt = () => { interrupted = true; };
@@ -192,7 +193,7 @@ function renderStatus(status: Awaited<ReturnType<FilesystemForgiumRepository["ge
 interface TriageOptions { nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }
 interface TriageAction { kind: "draft" | "inbox"; id: string; action: string }
 interface TriageResult { root: string; actions: TriageAction[]; stopReason: string }
-interface RunOptions { maxFeatures?: string; untilEmpty?: boolean; nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }
+interface RunOptions { maxFeatures?: string; untilEmpty?: boolean; engine?: string; nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }
 interface RunFeature { id: string; state: FeatureState; action: string }
 interface RunResult { root: string; actions: TriageAction[]; features: RunFeature[]; stopReason: string }
 
@@ -298,6 +299,7 @@ async function triage(repo: FilesystemForgiumRepository, options: TriageOptions)
 
 async function runLoop(repo: FilesystemForgiumRepository, options: RunOptions, isInterrupted = () => false): Promise<RunResult> {
   const maxFeatures = parseRunBudget(options);
+  if (options.engine !== undefined && options.engine !== "pi") throw new RunOptionsInvalidError(`Unknown execution engine: ${options.engine}`);
   const result: RunResult = { root: repo.root, actions: [], features: [], stopReason: "no_actionable_work" };
   const report = await repo.validate();
   if (isInterrupted()) {
@@ -330,10 +332,16 @@ async function runLoop(repo: FilesystemForgiumRepository, options: RunOptions, i
     return result;
   }
 
+  const registry = options.engine === "pi" ? new ExecutionAdapterRegistry([new PiRpcExecutionAdapter()]) : new ExecutionAdapterRegistry();
   const candidates = ready.slice(0, maxFeatures);
   for (const feature of candidates) {
-    result.features.push({ id: feature.id, state: feature.state, action: "engine_unavailable" });
-    result.stopReason = "engine_unavailable";
+    const execution = await repo.executeFeature(feature.id, registry);
+    result.features.push({ id: feature.id, state: execution.feature.state, action: execution.outcome });
+    if (execution.outcome === "needs_human") result.stopReason = options.engine ? "engine_unavailable" : "engine_unavailable";
+    else if (execution.outcome === "completed") result.stopReason = "review_required";
+    else if (execution.outcome === "blocked") result.stopReason = "feature_blocked";
+    else if (execution.outcome === "verification_failed") result.stopReason = "verification_failed";
+    else result.stopReason = "interrupted";
     break;
   }
   return result;
