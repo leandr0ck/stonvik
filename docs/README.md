@@ -16,6 +16,7 @@
 - [Plan 0004 — Estrategia de pruebas para receipts y review](plans/0004-test-strategy.md)
 - [Plan 0005 — Estrategia de pruebas para `forgium run`](plans/0005-test-strategy.md)
 - [Plan 0006 — Estrategia de pruebas para adapters de ejecución](plans/0006-test-strategy.md)
+- [Plan 0007 — Estrategia de pruebas end-to-end y endurecimiento](plans/0007-test-strategy.md)
 
 The ADRs are normative for decisions made after the initial technical
 specification. When an ADR and `loop-technical-spec.md` disagree, the ADR wins.
