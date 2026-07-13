@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   FilesystemForgiumRepository,
   SpecFlowExecutionAdapter,
+  buildSpecFlowSafetyPrompt,
   parseSpecFlowStatusResult,
 } from "../../core/index.js";
 
@@ -99,5 +100,17 @@ describe("Spec Flow execution adapter", () => {
     expect(parseSpecFlowStatusResult({ complete: false })).toMatchObject({ outcome: "needs_human" });
     expect(parseSpecFlowStatusResult({ complete: true, total: 0 })).toMatchObject({ outcome: "needs_human" });
     expect(parseSpecFlowStatusResult(null)).toBeNull();
+  });
+
+  it("builds a safety boundary around Forgium-owned state", async () => {
+    const fixture = await specFlowFixture({ complete: true, total: 1 });
+
+    expect(buildSpecFlowSafetyPrompt({
+      root: fixture.root,
+      feature: fixture.feature,
+      profile: fixture.profile,
+      runId: "run-spec-flow-test",
+      permissions: "repository",
+    })).toContain("Never modify, move, delete, or create files under product/, features/, or .forgium/");
   });
 });

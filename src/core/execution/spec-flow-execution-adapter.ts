@@ -41,7 +41,13 @@ export class SpecFlowExecutionAdapter implements ExecutionAdapter {
       return { outcome: "needs_human", summary: "Spec Flow adapter received an unsupported execution profile." };
     }
 
-    const child = spawn(this.command, ["--mode", "rpc", "--no-session"], {
+    const child = spawn(this.command, [
+      "--mode",
+      "rpc",
+      "--no-session",
+      "--append-system-prompt",
+      buildSpecFlowSafetyPrompt(request),
+    ], {
       cwd: request.root,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -177,6 +183,16 @@ export function buildSpecFlowStatusPrompt(request: ExecutionRequest): string {
     "Use the tool result as the only source of truth.",
     "If complete is true, report FORGIUM_SPEC_FLOW_RESULT: completed.",
     "Otherwise report FORGIUM_SPEC_FLOW_RESULT: needs_human.",
+  ].join("\n");
+}
+
+export function buildSpecFlowSafetyPrompt(request: ExecutionRequest): string {
+  return [
+    "You are operating as a delegated Spec Flow implementation agent inside Forgium.",
+    "Modify only files required by the current Spec Flow ticket.",
+    "Never modify, move, delete, or create files under product/, features/, or .forgium/.",
+    "Forgium owns Feature manifests, Feature state directories, leases, and receipts.",
+    `The repository root is ${request.root}.`,
   ].join("\n");
 }
 
