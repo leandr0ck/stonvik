@@ -4,7 +4,9 @@ Forgium is a repository-native workflow engine for software-development agents. 
 
 The repository is the source of truth. Forgium does not require a database or a hosted service.
 
-Technical decisions and the staged implementation plan live in [docs/](docs/README.md).
+Additional architecture and implementation details are available in
+[docs/](docs/README.md). Contributor instructions live in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Requirements
 
@@ -13,18 +15,8 @@ Technical decisions and the staged implementation plan live in [docs/](docs/READ
 
 ## Install
 
-If Forgium has been published to your npm registry:
-
 ```bash
 npm install --global forgium
-```
-
-To use this checkout during development:
-
-```bash
-npm install
-npm run build
-npm link
 ```
 
 Confirm that the CLI is available:
@@ -249,20 +241,14 @@ explícita; Forgium conserva los receipts, la verificación y la transición a
 forgium run --engine pi
 
 # Features con spec.md y tickets/.
-# Requiere que Pi tenga pi-spec-flow >= 0.4.8 instalado.
+# Instala la extensión una vez si vas a usar este engine:
+pi install npm:pi-spec-flow@0.4.8
 forgium run --engine pi-spec-flow
 ```
 
 El adapter de Spec Flow responde la confirmación del ticket ya seleccionado,
 pero no aprueba el trabajo: una Feature completada sigue necesitando la review
 explícita de Forgium para llegar a `done`.
-
-El smoke test real es opt-in y usa el modelo configurado por defecto en Pi, por
-lo que puede consumir tokens:
-
-```bash
-npm run test:e2e:pi
-```
 
 ### 4. Review, complete, or unblock
 
@@ -318,7 +304,6 @@ A completed Feature cannot be moved to another state through the CLI. Use Featur
 | `forgium inbox` | List Inbox items. |
 | `forgium triage [--non-interactive] [--edit] [--dry-run]` | Resolve Drafts and triage captured Inbox items. |
 | `forgium run [--max-features <n> | --until-empty] [--engine pi|pi-spec-flow]` | Run the bounded repository loop. Agent execution is opt-in. |
-| `npm run test:e2e:pi` | Run the opt-in real Pi + `pi-spec-flow` smoke test using Pi's configured default model. |
 | `forgium status` | Show counts by Inbox, Draft, and Feature state. |
 | `forgium validate` | Validate required directories and Inbox/Draft/Feature file schemas. Returns exit code `2` when invalid. |
 | `forgium feature create ...` | Create a ready Feature. |
@@ -352,7 +337,7 @@ forgium --json feature list --state ready
 
 When Forgium reports an error in JSON mode, it writes an object with an error code and message to standard error.
 
-## Validate before committing
+## Keep workflow state portable
 
 Run validation after manually editing Inbox items, Feature manifests, or Feature artifacts:
 
