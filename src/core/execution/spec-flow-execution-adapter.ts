@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { appendFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import type { ExecutionProfile } from "../domain/types.js";
 import type { ExecutionAdapter, ExecutionRequest, ExecutionResult } from "./execution-adapter.js";
@@ -112,6 +113,7 @@ export class SpecFlowExecutionAdapter implements ExecutionAdapter {
 
       const handleLine = (line: string) => {
         if (!line.trim()) return;
+        appendRpcDebugLine(line);
         let event: SpecFlowRpcEvent;
         try {
           event = JSON.parse(line) as SpecFlowRpcEvent;
@@ -171,6 +173,16 @@ export class SpecFlowExecutionAdapter implements ExecutionAdapter {
       request.signal?.addEventListener("abort", abort, { once: true });
       send({ id: request.runId, type: "prompt", message: profile.commands.implement });
     });
+  }
+}
+
+function appendRpcDebugLine(line: string): void {
+  const debugPath = process.env.FORGIUM_PI_RPC_LOG;
+  if (!debugPath) return;
+  try {
+    appendFileSync(debugPath, `${line}\n`, "utf8");
+  } catch {
+    // Diagnostics must never alter execution behaviour.
   }
 }
 

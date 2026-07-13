@@ -13,6 +13,10 @@ const e2e = process.env.FORGIUM_E2E_PI === "1" ? it : it.skip;
 describe("Pi + pi-spec-flow end-to-end", () => {
   e2e("executes one real spec-flow ticket with the configured Pi model", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-pi-spec-flow-e2e-"));
+    const rpcLogPath = path.join(root, "pi-rpc.jsonl");
+    const previousRpcLogPath = process.env.FORGIUM_PI_RPC_LOG;
+    process.env.FORGIUM_PI_RPC_LOG = rpcLogPath;
+    let passed = false;
     try {
       const repo = new FilesystemForgiumRepository(root);
       await repo.init();
@@ -64,7 +68,7 @@ describe("Pi + pi-spec-flow end-to-end", () => {
       const execution = await repo.executeFeature(
         feature.id,
         new ExecutionAdapterRegistry([
-          new SpecFlowExecutionAdapter(process.env.FORGIUM_PI_COMMAND ?? "pi", 3 * 60 * 1000),
+          new SpecFlowExecutionAdapter(process.env.FORGIUM_PI_COMMAND ?? "pi", 2 * 60 * 1000),
         ]),
       );
 
@@ -75,8 +79,15 @@ describe("Pi + pi-spec-flow end-to-end", () => {
 
       const completed = await repo.reviewFeature(feature.id, "approved", "Approved after real Pi smoke test.");
       expect(completed.state).toBe("done");
+      passed = true;
     } finally {
-      await fs.rm(root, { recursive: true, force: true });
+      if (previousRpcLogPath === undefined) delete process.env.FORGIUM_PI_RPC_LOG;
+      else process.env.FORGIUM_PI_RPC_LOG = previousRpcLogPath;
+      if (!passed || process.env.FORGIUM_E2E_KEEP === "1") {
+        console.error(`Forgium Pi E2E artifacts retained at: ${root}`);
+      } else {
+        await fs.rm(root, { recursive: true, force: true });
+      }
     }
-  }, 3 * 60 * 1000);
+  }, 150_000);
 });
