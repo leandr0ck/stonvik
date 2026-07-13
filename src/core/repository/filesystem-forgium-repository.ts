@@ -16,6 +16,8 @@ import { isoNow, shortId, slugify, timestampForFile } from "../services/id.js";
 import { specFlowCommandsForSpec } from "../services/spec-flow-commands.js";
 import { canTransition } from "../transitions/transition-rules.js";
 import { forgiumPaths } from "./paths.js";
+import type { ExecutionOutcome, ExecutionResult } from "../execution/execution-adapter.js";
+import { ExecutionAdapterRegistry } from "../execution/execution-adapter.js";
 
 const exec = promisify(execCallback);
 const DEFAULT_CHECK_TIMEOUT_MS = 120_000;
@@ -254,6 +256,35 @@ export class FilesystemForgiumRepository {
     return this.transition(id, decision === "approved" ? "done" : decision === "changes_requested" ? "doing" : "blocked");
   }
 
+  async executeFeature(id: string, registry: ExecutionAdapterRegistry): Promise<{ outcome: ExecutionOutcome | "needs_human"; feature: Feature; summary: string; adapterId?: string }> {
+    const ready = await this.requireFeature(id);
+    if (ready.state !== "ready") throw new InvalidStateTransitionError(ready.state, "doing");
+    const profile = await this.inspectExecutionMode(id);
+    const runId = `run-${timestampForFile()}-${shortId()}`;
+    const request = { root: this.root, feature: ready, profile, runId, permissions: "repository" as const };
+    const adapter = await registry.resolve(request);
+    if (!adapter) return { outcome: "needs_human", feature: ready, summary: "No execution adapter is available for this Feature." };
+
+    const doing = await this.startFeature(id);
+    const result = await adapter.execute({ ...request, feature: doing });
+    await this.persistReceipt(doing, this.createExecutionReceipt(doing, runId, adapter.id, result));
+    if (result.outcome === "completed") {
+      const verification = await this.verifyFeature(id, { runId });
+      return { outcome: verification.outcome === "failed" ? "verification_failed" : result.outcome, feature: (await this.requireFeature(id)), summary: result.summary, adapterId: adapter.id };
+    }
+    if (result.outcome === "blocked" || result.outcome === "needs_human") {
+      const blocked = await this.transition(id, "blocked");
+      await this.persistReceipt(blocked, this.createHandoffReceipt(blocked, runId, result.outcome, undefined, result.reason ?? result.summary));
+      return { outcome: result.outcome, feature: blocked, summary: result.summary, adapterId: adapter.id };
+    }
+    if (result.outcome === "verification_failed") {
+      await this.persistReceipt(doing, this.createHandoffReceipt(doing, runId, "failed", undefined, result.reason ?? result.summary));
+    } else {
+      await this.persistReceipt(doing, this.createHandoffReceipt(doing, runId, "cancelled", undefined, result.reason ?? result.summary));
+    }
+    return { outcome: result.outcome, feature: await this.requireFeature(id), summary: result.summary, adapterId: adapter.id };
+  }
+
   async listFeatures(state?: FeatureState): Promise<Feature[]> {
     await this.assertInitialized();
     const states = state ? [state] : FEATURE_STATES;
@@ -386,7 +417,17 @@ export class FilesystemForgiumRepository {
     };
   }
 
-  private createHandoffReceipt(feature: Feature, runId: string, outcome: "failed" | "cancelled", relatedReceipt: string, reason: string): Receipt {
+  private createExecutionReceipt(feature: Feature, runId: string, engine: string, result: ExecutionResult): Receipt {
+    return {
+      ...this.receiptBase(feature, "execution", result.outcome, result.summary, runId, "executor", engine),
+      kind: "execution",
+      outcome: result.outcome,
+      engine,
+      artifacts: result.artifacts
+    };
+  }
+
+  private createHandoffReceipt(feature: Feature, runId: string, outcome: "failed" | "blocked" | "needs_human" | "cancelled", relatedReceipt: string | undefined, reason: string): Receipt {
     return {
       ...this.receiptBase(feature, "handoff", outcome, reason, runId, "system", "forgium"),
       kind: "handoff",
