@@ -175,6 +175,32 @@ For a Feature containing `spec.md`, the suggested Pi commands are:
 /spec-flow-next <path-to-spec.md>
 ```
 
+### Ejecución automatizada opt-in
+
+`forgium run` puede delegar la implementación a Pi. Elige el engine de forma
+explícita; Forgium conserva los receipts, la verificación y la transición a
+`review`.
+
+```bash
+# Features directas.
+forgium run --engine pi
+
+# Features con spec.md y tickets/.
+# Requiere que Pi tenga pi-spec-flow >= 0.4.8 instalado.
+forgium run --engine pi-spec-flow
+```
+
+El adapter de Spec Flow responde la confirmación del ticket ya seleccionado,
+pero no aprueba el trabajo: una Feature completada sigue necesitando la review
+explícita de Forgium para llegar a `done`.
+
+El smoke test real es opt-in y usa el modelo configurado por defecto en Pi, por
+lo que puede consumir tokens:
+
+```bash
+npm run test:e2e:pi
+```
+
 ### 4. Review, complete, or unblock
 
 When implementation is ready, send the Feature to review:

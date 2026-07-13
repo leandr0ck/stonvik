@@ -37,6 +37,11 @@ El adapter:
 - falla cerrado si no recibe un resultado estructurado;
 - respeta timeout y cancelación RPC.
 
+El adapter requiere `pi-spec-flow >= 0.4.8`. Esa versión actualiza el planning
+context cuando el comando recibe un `spec.md` cuya carpeta fue movida por el
+ciclo de vida de Forgium (`ready → doing`); sin esa actualización, las tools
+de cierre podrían resolver el ticket store anterior.
+
 Forgium no marca tickets ni crea handoffs. El adapter tampoco aprueba la
 Feature: `executeFeature` conserva la transición a `review` y los receipts.
 
@@ -47,3 +52,5 @@ Feature: `executeFeature` conserva la transición a `review` y los receipts.
 - `--engine pi` continúa reservado para Features `direct`.
 - La disponibilidad del binario Pi no garantiza que la extensión esté cargada;
   si la consulta estructurada no aparece, el resultado es `needs_human`.
+- La integración se validó con un smoke test real opt-in que completa un ticket
+  mínimo y requiere review explícito antes de `done`.

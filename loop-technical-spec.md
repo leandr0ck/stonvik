@@ -19,10 +19,16 @@ conflict with an earlier section of this document, the ADR takes precedence.
 - [ADR 0002: Drafts and lifecycle artifacts](docs/adr/0002-draft-state-and-artifacts.md)
 - [ADR 0003: `forgium run` contract](docs/adr/0003-forgium-run-contract.md)
 - [ADR 0004: Verification, review, and receipts](docs/adr/0004-verification-review-and-receipts.md)
+- [ADR 0005: `ExecutionAdapter` contract](docs/adr/0005-execution-adapter-contract.md)
+- [ADR 0006: `pi-spec-flow` RPC adapter](docs/adr/0006-pi-spec-flow-adapter.md)
 
 In particular, Forgium has one operational entry point (`forgium run`), keeps
 incomplete work in `features/draft/`, and requires persisted verification and
 review evidence before a Feature can reach `done`.
+
+The initial implementation scope is complete. See the current status in
+[docs/README.md](docs/README.md) and the completed phase plan in
+[docs/plans/0001-loop-implementation-plan.md](docs/plans/0001-loop-implementation-plan.md).
 
 ---
 

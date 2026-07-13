@@ -1,8 +1,9 @@
 # Plan 0001: Implementación del loop de Forgium
 
-**Estado:** Propuesto  
+**Estado:** Completado para el alcance inicial
 **Fecha:** 2026-07-12  
-**Basado en:** ADR 0001–0004
+**Actualizado:** 2026-07-13
+**Basado en:** ADR 0001–0006
 
 ## Objetivo
 
@@ -10,6 +11,23 @@ Entregar `forgium run` como el punto único de entrada para transformar trabajo
 aprobado en una Feature revisada, con estado durable, límites seguros y
 evidencia de ejecución. La entrega se divide para que el modelo de datos y las
 garantías de calidad existan antes de ejecutar agentes de forma autónoma.
+
+## Estado de cierre
+
+Las fases 0–6 de este plan están implementadas. Las decisiones posteriores
+sobre adapters se registraron en ADR 0005 y ADR 0006. La validación vigente
+incluye pruebas deterministas para el core y un smoke test opt-in con Pi real
+y `pi-spec-flow@0.4.8`.
+
+| Fase | Estado | Evidencia principal |
+| --- | --- | --- |
+| 0 | Completada | Índice documental y ADRs normativos. |
+| 1 | Completada | Drafts durables, validación y promoción. |
+| 2 | Completada | `forgium triage` y controles no interactivos. |
+| 3 | Completada | Receipts append-only, verificación y review gate. |
+| 4 | Completada | `forgium run`, preflight, límites y stop reasons. |
+| 5 | Completada | Contrato de adapters, Pi RPC y `pi-spec-flow` RPC. |
+| 6 | Completada | E2E determinista y smoke test real opt-in. |
 
 ## Principios de entrega
 
@@ -122,9 +140,8 @@ Feature con límites explícitos.
 **Resultado:** `run` puede ejecutar una Feature de punta a punta sin que el
 orquestador conozca detalles de Pi o `pi-spec-flow`.
 
-**Decisión pendiente antes de implementar:** documentar un contrato de
-`ExecutionAdapter`: descubrimiento, configuración, permisos, inputs,
-resultados tipados, aislamiento y cancelación.
+**Decisión resuelta:** ADR 0005 documenta el contrato de `ExecutionAdapter` y
+ADR 0006 define el adapter `pi-spec-flow` mediante RPC.
 
 **Cambios principales**
 

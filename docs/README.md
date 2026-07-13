@@ -21,3 +21,21 @@
 
 The ADRs are normative for decisions made after the initial technical
 specification. When an ADR and `loop-technical-spec.md` disagree, the ADR wins.
+
+## Estado de implementación
+
+**Actualizado:** 2026-07-13
+**Estado:** el alcance inicial de las fases 0–6 está implementado y validado.
+
+- Inbox, Drafts, triage, receipts, verificación, review y `forgium run` están
+  cubiertos por pruebas deterministas.
+- Los adapters opt-in `pi` y `pi-spec-flow` están disponibles desde
+  `forgium run --engine <engine>`.
+- La integración spec-driven requiere `pi-spec-flow >= 0.4.8` y fue validada
+  con Pi real: ticket cerrado, estado estructurado completo, receipts y
+  transición `ready → doing → review → done`.
+- El smoke test real es opt-in porque usa el modelo configurado en Pi:
+  `npm run test:e2e:pi`.
+
+Consulta los planes de prueba para la cobertura detallada y los ADR para los
+contratos normativos.
