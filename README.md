@@ -61,6 +61,69 @@ forgium review feature-add-whatsapp-contact-button
 
 Use `forgium status` at any time to see the number of Inbox items and Features in each state.
 
+## The Loop method
+
+Forgium is designed to run the same bounded work loop repeatedly. The
+repository is the durable queue and source of truth; each pass selects work,
+delegates implementation, records evidence, and stops at an explicit gate.
+
+```text
+raw request
+    │
+    ▼
+ Inbox ──triage──▶ Draft ──promote──▶ Ready
+                                      │
+                              select oldest eligible
+                                      │
+                                      ▼
+                                   Doing
+                                      │
+                         execution + verification
+                                      │
+                                      ▼
+                                   Review
+                                  ╱      ╲
+                           approve        changes/block
+                              │              │
+                              ▼              ▼
+                            Done       Doing / Blocked
+                                             │
+                                      unblock → Ready
+```
+
+### How one loop pass works
+
+1. **Capture** — record raw intent in `product/inbox/`. Inbox content is not
+   executable work.
+2. **Triage** — deliberately clarify, edit, defer, merge, or promote the
+   request. Incomplete work becomes a Draft, never an executable Feature.
+3. **Prepare** — promote a valid Draft, or create a Feature directly. A
+   Feature in `features/ready/` has a valid manifest, goal, and acceptance
+   criteria.
+4. **Select** — choose the oldest eligible ready Feature unless an explicit
+   limit or future priority policy says otherwise.
+5. **Execute** — move the complete Feature directory to `doing/` and delegate
+   it to the selected engine:
+   - `direct`: Pi implements the Feature directly;
+   - `spec-flow`: Pi delegates ticket ordering, handoffs, and checkpoints to
+     `pi-spec-flow`.
+6. **Verify** — record execution and verification receipts. A successful
+   implementation moves the Feature to `review`; it does not approve itself.
+7. **Review** — an explicit review decision moves the Feature to `done`, back
+   to `doing`, or `blocked`.
+8. **Resume** — a blocked Feature returns to `ready` only after its blocker is
+   resolved; the next loop pass can then select it again.
+
+### Loop safety rules
+
+- `forgium run` is bounded: by default it processes at most one Feature.
+- `--max-features` and `--until-empty` do not bypass human gates or review.
+- There are no unlimited retries, parallel execution, or LLM auto-approval.
+- Feature transitions move the complete directory; individual Spec Flow
+  tickets remain owned by `pi-spec-flow`.
+- Receipts and repository artifacts are durable; leases and process logs under
+  `.forgium/runtime/` are local runtime metadata.
+
 ## What Forgium creates
 
 `forgium init` creates the following structure:
