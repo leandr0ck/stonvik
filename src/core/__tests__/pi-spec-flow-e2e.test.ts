@@ -24,7 +24,7 @@ describe("Pi + pi-spec-flow end-to-end", () => {
       const feature = await repo.createFeature({
         title: "Pi Spec Flow Smoke Test",
         goal: "Validate the real Pi and pi-spec-flow integration.",
-        acceptance: ["The smoke-test marker file exists with the requested content."],
+        acceptance: ["target.txt contains exactly after."],
       });
       const specPath = path.join(feature.path, "spec.md");
       await fs.writeFile(
@@ -32,30 +32,31 @@ describe("Pi + pi-spec-flow end-to-end", () => {
         [
           "# Pi Spec Flow Smoke Test",
           "",
-          "Create `e2e-marker.txt` at the repository root containing exactly `forgium-e2e`.",
+          "Edit `target.txt` at the repository root so it contains exactly `after`.",
         ].join("\n"),
       );
+      await fs.writeFile(path.join(root, "target.txt"), "before\n");
       await fs.mkdir(path.join(feature.path, "tickets"));
       await fs.writeFile(
-        path.join(feature.path, "tickets", "001-create-marker.md"),
+        path.join(feature.path, "tickets", "001-update-text.md"),
         [
           "---",
           "id: 1",
-          "title: Create the smoke-test marker",
-          "description: Create e2e-marker.txt at the repository root with exactly forgium-e2e.",
+          "title: Update one text file",
+          "description: Replace the only value in target.txt from before to after.",
           "status: pending",
           "source_section: Pi Spec Flow Smoke Test",
           "feature_key: pi-spec-flow-smoke-test",
           `source_spec_path: ${path.relative(root, specPath)}`,
-          "acceptance_criteria: '- [ ] e2e-marker.txt contains exactly forgium-e2e'",
-          "verification: '- [ ] test \"$(cat e2e-marker.txt)\" = \"forgium-e2e\"'",
+          "acceptance_criteria: '- [ ] target.txt contains exactly after'",
+          "verification: '- [ ] test \"$(cat target.txt)\" = \"after\"'",
           "estimated_scope: XS",
           "phase: Foundation",
           "is_checkpoint: false",
           "order_index: 1",
           "---",
           "",
-          "Create the marker file, verify it, fill all handoff fields, and close this ticket with the Spec Flow handoff tool.",
+          "Edit only target.txt, verify it, fill all handoff fields, and close this ticket with the Spec Flow handoff tool.",
           "",
         ].join("\n"),
       );
@@ -63,13 +64,13 @@ describe("Pi + pi-spec-flow end-to-end", () => {
       const execution = await repo.executeFeature(
         feature.id,
         new ExecutionAdapterRegistry([
-          new SpecFlowExecutionAdapter(process.env.FORGIUM_PI_COMMAND ?? "pi", 10 * 60 * 1000),
+          new SpecFlowExecutionAdapter(process.env.FORGIUM_PI_COMMAND ?? "pi", 3 * 60 * 1000),
         ]),
       );
 
       expect(execution.outcome).toBe("completed");
       expect(execution.feature.state).toBe("review");
-      await expect(fs.readFile(path.join(root, "e2e-marker.txt"), "utf8")).resolves.toBe("forgium-e2e");
+      expect((await fs.readFile(path.join(root, "target.txt"), "utf8")).trim()).toBe("after");
       await expect(repo.listReceipts(feature.id)).resolves.toHaveLength(2);
 
       const completed = await repo.reviewFeature(feature.id, "approved", "Approved after real Pi smoke test.");
@@ -77,5 +78,5 @@ describe("Pi + pi-spec-flow end-to-end", () => {
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
-  }, 10 * 60 * 1000);
+  }, 3 * 60 * 1000);
 });

@@ -3,14 +3,19 @@
   "version": "0.1.0",
   "description": "Repository-native workflow engine for software development agents.",
   "type": "module",
-  "bin": { "forgium": "dist/cli/index.js" },
-  "files": ["dist", "README.md"],
+  "bin": {
+    "forgium": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "dev": "tsx src/cli/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e:pi": "FORGIUM_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-e2e.test.ts --testTimeout=600000"
+    "test:e2e:pi": "FORGIUM_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-e2e.test.ts --testTimeout=180000"
   },
   "dependencies": {
     "commander": "^12.1.0",
@@ -21,7 +26,9 @@
     "@types/node": "^22.5.4",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2",
-    "vitest": "^2.1.1"
+    "vitest": "^4.1.10"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }
