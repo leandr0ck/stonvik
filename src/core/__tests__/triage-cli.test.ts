@@ -2,9 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import YAML from "yaml";
 import { describe, expect, it } from "vitest";
-import { FilesystemForgiumRepository } from "../../core/index.js";
 
 async function cli(root: string, ...args: string[]): Promise<{ stdout: string; stderr: string }> {
   const cliPath = path.resolve(process.cwd(), "src/cli/index.ts");
@@ -32,33 +30,36 @@ describe("forgium triage", () => {
     await cli(root, "capture", "Add dark mode");
 
     const result = await cli(root, "triage", "--non-interactive", "--json");
-    const repo = new FilesystemForgiumRepository(root);
-
     expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: "human_input_required" });
-    await expect(repo.listInbox()).resolves.toMatchObject([{ status: "captured" }]);
-    await expect(repo.listDrafts()).resolves.toHaveLength(0);
+    const inbox = JSON.parse((await cli(root, "--json", "inbox")).stdout);
+    expect(inbox).toMatchObject([{ status: "captured" }]);
   });
 
-  it("runs the CLI flow from captured Inbox to a ready Feature", async () => {
+  it("classifies an Inbox item into a ready implementation Work in one CLI session", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-triage-e2e-"));
     await cli(root, "init");
     await cli(root, "capture", "Add dark mode");
 
-    await run(process.execPath, [path.resolve(process.cwd(), "node_modules/tsx/dist/cli.mjs"), path.resolve(process.cwd(), "src/cli/index.ts"), "--root", root, "triage"], root, "a\ns\n");
-    const repo = new FilesystemForgiumRepository(root);
-    const draft = (await repo.listDrafts())[0]!;
-    await fs.writeFile(path.join(draft.path, "draft.md"), `---\n${YAML.stringify({
-      ...draft.frontmatter,
-      goal: "Let users choose a theme.",
-      acceptance: ["A theme toggle is visible"]
-    })}---\n\n# Context\n`);
-    await cli(root, "triage", "--non-interactive");
+    await run(process.execPath, [path.resolve(process.cwd(), "node_modules/tsx/dist/cli.mjs"), path.resolve(process.cwd(), "src/cli/index.ts"), "--root", root, "triage"], root, "t\nLet users choose a theme.\nA theme toggle is visible\n\n\nA theme toggle is visible:browser-check\n\n");
 
-    const inbox = (await repo.listInbox())[0]!;
-    const feature = (await repo.listFeatures("ready"))[0]!;
+    const inbox = JSON.parse((await cli(root, "--json", "inbox")).stdout)[0];
+    const feature = JSON.parse((await cli(root, "--json", "work", "list", "--state", "ready")).stdout)[0];
 
-    expect(inbox).toMatchObject({ status: "promoted", draftRef: "draft-add-dark-mode", featureRef: feature.id });
+    expect(inbox).toMatchObject({ status: "promoted", featureRef: feature.id });
     expect(feature.manifest).toMatchObject({ id: "feature-add-dark-mode", source: { type: "inbox", ref: inbox.id } });
+  });
+
+  it("marks an Inbox item needs-definition without creating executable Work", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-triage-spec-e2e-"));
+    await cli(root, "init");
+    await cli(root, "capture", "Add notifications");
+
+    await run(process.execPath, [path.resolve(process.cwd(), "node_modules/tsx/dist/cli.mjs"), path.resolve(process.cwd(), "src/cli/index.ts"), "--root", root, "triage"], root, "s\n");
+
+    const inbox = JSON.parse((await cli(root, "--json", "inbox")).stdout)[0];
+    const work = JSON.parse((await cli(root, "--json", "work", "list", "--state", "ready")).stdout);
+    expect(inbox).toMatchObject({ status: "needs_definition", definitionKind: "spec", definitionRef: expect.stringMatching(/^docs\/specs\//) });
+    expect(work).toEqual([]);
   });
 
   it("does not write during dry-run", async () => {
@@ -67,10 +68,8 @@ describe("forgium triage", () => {
     await cli(root, "capture", "Add dark mode");
 
     const result = await cli(root, "triage", "--dry-run", "--json");
-    const repo = new FilesystemForgiumRepository(root);
-
     expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: "dry_run" });
-    await expect(repo.listInbox()).resolves.toMatchObject([{ status: "captured" }]);
-    await expect(repo.listDrafts()).resolves.toHaveLength(0);
+    const inbox = JSON.parse((await cli(root, "--json", "inbox")).stdout);
+    expect(inbox).toMatchObject([{ status: "captured" }]);
   });
 });

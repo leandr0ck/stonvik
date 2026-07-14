@@ -89,7 +89,10 @@ export function buildPiPrompt(request: ExecutionRequest): string {
     `Feature: ${request.feature.id}`,
     `Title: ${request.feature.manifest.title}`,
     `Goal: ${request.feature.manifest.goal}`,
+    `Constraints:\n${(request.feature.manifest.constraints ?? []).map((constraint) => `- ${constraint}`).join("\n") || "- none"}`,
     `Acceptance criteria:\n${request.feature.manifest.acceptance.map((criterion) => `- ${criterion}`).join("\n")}`,
+    `Verification policy:\n${request.feature.manifest.verification.commands.map((command) => `- ${command.name}: ${command.run}`).join("\n") || "- manual evidence required"}`,
+    `Allowed paths: ${(request.allowedPaths ?? []).join(", ") || "repository source files only"}`,
     profile,
     "Do not edit Forgium state directories, manifests, or receipts.",
     "When finished, print exactly one final line: FORGIUM_RESULT: completed, verification_failed, blocked, needs_human, or cancelled.",
@@ -98,8 +101,14 @@ export function buildPiPrompt(request: ExecutionRequest): string {
 }
 
 export function parsePiResult(text: string): ExecutionResult {
-  const match = text.match(RESULT_PATTERN);
+  const matches = [...text.matchAll(new RegExp(RESULT_PATTERN.source, "gi"))];
+  const match = matches.at(-1);
   if (!match) return { outcome: "needs_human", summary: "Pi finished without a recognized Forgium result marker." };
+  const markerValue = text.slice((match.index ?? 0) + match[0].length).trim();
+  try {
+    const structured = JSON.parse(markerValue) as Partial<ExecutionResult>;
+    if (typeof structured.outcome === "string" && ["completed", "verification_failed", "blocked", "needs_human", "cancelled"].includes(structured.outcome)) return { ...structured, outcome: structured.outcome as ExecutionResult["outcome"], summary: typeof structured.summary === "string" ? structured.summary : `Pi reported ${structured.outcome}.` };
+  } catch { /* legacy marker has no JSON payload */ }
   const outcome = match[1]!.toLowerCase() as ExecutionResult["outcome"];
   return { outcome, summary: `Pi reported ${outcome}.` };
 }

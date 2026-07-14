@@ -8,6 +8,8 @@
 - [ADR 0004 — Verificación, review y receipts](adr/0004-verification-review-and-receipts.md)
 - [ADR 0005 — Contrato de `ExecutionAdapter`](adr/0005-execution-adapter-contract.md)
 - [ADR 0006 — Adaptador `pi-spec-flow` mediante RPC](adr/0006-pi-spec-flow-adapter.md)
+- [ADR 0007 — Loop de implementación por observación](adr/0007-implementation-observation-loop.md)
+- [ADR 0008 — `forgium run` como loop autónomo de agentes](adr/0008-autonomous-agent-run-loop.md)
 
 ## Planes
 
@@ -18,6 +20,8 @@
 - [Plan 0005 — Estrategia de pruebas para `forgium run`](plans/0005-test-strategy.md)
 - [Plan 0006 — Estrategia de pruebas para adapters de ejecución](plans/0006-test-strategy.md)
 - [Plan 0007 — Estrategia de pruebas end-to-end y endurecimiento](plans/0007-test-strategy.md)
+- [Plan 0009 — Implementación observada mediante `pi-spec-flow`](plans/0009-implementation-observation-plan.md)
+- [Objetivo 0010 — Loop autónomo de agentes](plans/0010-autonomous-agent-loop-objective.md)
 
 The ADRs are normative for decisions made after the initial technical
 specification. When an ADR and `loop-technical-spec.md` disagree, the ADR wins.
@@ -25,10 +29,12 @@ specification. When an ADR and `loop-technical-spec.md` disagree, the ADR wins.
 ## Estado de implementación
 
 **Actualizado:** 2026-07-13
-**Estado:** el alcance inicial de las fases 0–6 está implementado y validado.
+**Estado:** el loop autónomo está implementado; las fases históricas de Draft
+se conservan solo como registro y no forman parte del árbol ejecutable.
 
-- Inbox, Drafts, triage, receipts, verificación, review y `forgium run` están
-  cubiertos por pruebas deterministas.
+- Inbox, definición humana, clasificación, receipts, verificación, review,
+  selección secuencial y `forgium run --watch` están cubiertos por pruebas
+  deterministas.
 - Los adapters opt-in `pi` y `pi-spec-flow` están disponibles desde
   `forgium run --engine <engine>`.
 - La integración spec-driven requiere `pi-spec-flow >= 0.4.8` y fue validada

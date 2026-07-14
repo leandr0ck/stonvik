@@ -221,6 +221,7 @@ export function parseSpecFlowStatusResult(value: unknown): ExecutionResult | nul
     return {
       outcome: "completed",
       summary: `Spec Flow completed ${status.done ?? status.total}/${status.total} tickets.`,
+      details: { specFlow: status },
     };
   }
 
@@ -233,11 +234,13 @@ export function parseSpecFlowStatusResult(value: unknown): ExecutionResult | nul
     outcome: "needs_human",
     summary: `Spec Flow requires human attention: ${reason}`,
     reason,
+    details: { specFlow: status },
   };
 }
 
 function parseSpecFlowMarker(text: string): ExecutionResult | null {
-  const match = text.match(RESULT_PATTERN);
+  const matches = [...text.matchAll(new RegExp(RESULT_PATTERN.source, "gi"))];
+  const match = matches.at(-1);
   if (!match) return null;
   const outcome = match[1]!.toLowerCase() as ExecutionResult["outcome"];
   return { outcome, summary: `Spec Flow reported ${outcome}.` };

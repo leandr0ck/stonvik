@@ -21,7 +21,7 @@ describe("Pi RPC execution adapter", () => {
     await fs.chmod(fakePi, 0o755);
     const repo = new FilesystemForgiumRepository(root);
     await repo.init();
-    const feature = await repo.createFeature({ title: "Pi work", goal: "Run Pi safely.", acceptance: ["The result is typed"] });
+    const feature = await repo.createFeature({ title: "Pi work", goal: "Run Pi safely.", acceptance: ["The result is typed"], verification: { commands: [{ name: "pass", run: "true" }] } });
     const adapter = new PiRpcExecutionAdapter(fakePi, 5_000);
     const profile = await repo.inspectExecutionMode(feature.id);
 
@@ -37,7 +37,7 @@ describe("Pi RPC execution adapter", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-pi-prompt-test-"));
     const repo = new FilesystemForgiumRepository(root);
     await repo.init();
-    const feature = await repo.createFeature({ title: "Prompt work", goal: "Provide context.", acceptance: ["Context is present"] });
+    const feature = await repo.createFeature({ title: "Prompt work", goal: "Provide context.", acceptance: ["Context is present"], verification: { commands: [{ name: "pass", run: "true" }] } });
     const profile = await repo.inspectExecutionMode(feature.id);
 
     const prompt = buildPiPrompt({ root, feature, profile, runId: "run-test", permissions: "repository" });
@@ -46,4 +46,3 @@ describe("Pi RPC execution adapter", () => {
     expect(prompt).toContain("FORGIUM_RESULT");
   });
 });
-

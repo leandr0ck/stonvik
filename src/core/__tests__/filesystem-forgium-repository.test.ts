@@ -49,7 +49,7 @@ describe("FilesystemForgiumRepository", () => {
 
   it("creates features and transitions through the default lifecycle", async () => {
     const { root, repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "Add WhatsApp Button", goal: "Add a storefront contact button.", acceptance: ["Button is visible"] });
+    const feature = await repo.createFeature({ title: "Add WhatsApp Button", goal: "Add a storefront contact button.", acceptance: ["Button is visible"], verification: { commands: [{ name: "pass", run: "true" }] } });
     expect(feature.state).toBe("ready");
     expect((await repo.getStatus()).features.ready).toBe(1);
 
@@ -67,7 +67,7 @@ describe("FilesystemForgiumRepository", () => {
 
   it("detects spec-flow execution profiles", async () => {
     const { repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "Progressive Web App", goal: "Make storefronts installable.", acceptance: ["Manifest exists"] });
+    const feature = await repo.createFeature({ title: "Progressive Web App", goal: "Make storefronts installable.", acceptance: ["Manifest exists"], verification: { commands: [{ name: "pass", run: "true" }] } });
     await fs.writeFile(path.join(feature.path, "spec.md"), "# Spec");
     const needsPlan = await repo.inspectExecutionMode(feature.id);
     expect(needsPlan.kind).toBe("spec-needs-plan");

@@ -1,6 +1,6 @@
 {
   "name": "forgium",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Repository-native workflow engine for software development agents.",
   "type": "module",
   "bin": {
@@ -15,7 +15,10 @@
     "test": "vitest run",
     "dev": "tsx src/cli/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e:pi": "FORGIUM_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-e2e.test.ts --testTimeout=150000"
+    "test:e2e:product": "npm run build && FORGIUM_E2E_DIST=1 vitest run src/core/__tests__/product-loop-e2e.test.ts",
+    "test:e2e:implementation": "npm run build && FORGIUM_E2E_DIST=1 vitest run src/core/__tests__/implementation-observation-e2e.test.ts",
+    "test:e2e:autonomous": "npm run build && vitest run src/core/__tests__/autonomous-run-loop.test.ts",
+    "test:e2e:implementation:pi": "npm run build && FORGIUM_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-implement-e2e.test.ts --testTimeout=150000"
   },
   "dependencies": {
     "commander": "^12.1.0",

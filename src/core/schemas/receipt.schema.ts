@@ -34,8 +34,8 @@ const VerificationReceiptSchema = ReceiptBaseSchema.extend({
 
 const ReviewReceiptSchema = ReceiptBaseSchema.extend({
   kind: z.literal("review"),
-  outcome: z.enum(["approved", "changes_requested", "blocked"]),
-  decision: z.enum(["approved", "changes_requested", "blocked"]),
+  outcome: z.enum(["approved", "changes_requested", "blocked", "needs_human"]),
+  decision: z.enum(["approved", "changes_requested", "blocked", "needs_human"]),
   findings: z.array(z.string().min(1)).optional()
 });
 
@@ -49,7 +49,8 @@ const HandoffReceiptSchema = ReceiptBaseSchema.extend({
 const ExecutionReceiptSchema = ReceiptBaseSchema.extend({
   kind: z.literal("execution"),
   engine: z.string().optional(),
-  artifacts: z.array(z.string().min(1)).optional()
+  artifacts: z.array(z.string().min(1)).optional(),
+  details: z.record(z.unknown()).optional()
 });
 
 export const ReceiptSchema = z.discriminatedUnion("kind", [

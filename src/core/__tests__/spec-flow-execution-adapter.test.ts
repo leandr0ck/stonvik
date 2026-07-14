@@ -40,6 +40,7 @@ async function specFlowFixture(status: object) {
     title: "Spec Flow work",
     goal: "Run the checked-in implementation plan.",
     acceptance: ["All planned tickets are complete"],
+    verification: { commands: [{ name: "pass", run: "true" }] },
   });
   await fs.writeFile(path.join(feature.path, "spec.md"), "# Spec Flow\n");
   await fs.mkdir(path.join(feature.path, "tickets"));

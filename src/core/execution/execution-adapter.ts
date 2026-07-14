@@ -8,6 +8,7 @@ export interface ExecutionRequest {
   profile: ExecutionProfile;
   runId: string;
   permissions: "repository";
+  allowedPaths?: string[];
   signal?: AbortSignal;
 }
 
@@ -16,6 +17,7 @@ export interface ExecutionResult {
   summary: string;
   artifacts?: string[];
   reason?: string;
+  details?: Record<string, unknown>;
 }
 
 export interface ExecutionAdapter {

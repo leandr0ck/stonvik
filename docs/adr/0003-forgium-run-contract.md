@@ -1,4 +1,8 @@
-# ADR 0003: Contrato de `forgium run`
+# ADR 0003: Contrato histórico de `forgium run`
+
+> **Superseded:** la interfaz principal y el orden del loop están definidos
+> por [ADR 0008](0008-autonomous-agent-run-loop.md). Este documento conserva
+> únicamente el contrato de recuperación histórico de las APIs manuales.
 
 **Estado:** Propuesto  
 **Fecha:** 2026-07-12  

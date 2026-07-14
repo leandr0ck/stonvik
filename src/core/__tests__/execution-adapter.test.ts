@@ -14,7 +14,7 @@ async function tempRepo() {
 describe("execution adapters", () => {
   it("executes a completed result, verifies it, and stops at review", async () => {
     const { repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "Adapter work", goal: "Run through an adapter.", acceptance: ["The adapter result is recorded"] });
+    const feature = await repo.createFeature({ title: "Adapter work", goal: "Run through an adapter.", acceptance: ["The adapter result is recorded"], verification: { commands: [{ name: "pass", run: "true" }] } });
     const registry = new ExecutionAdapterRegistry([new DeterministicExecutionAdapter()]);
 
     const result = await repo.executeFeature(feature.id, registry);
@@ -27,7 +27,7 @@ describe("execution adapters", () => {
 
   it("maps a blocked adapter result to blocked with a handoff", async () => {
     const { repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "Blocked adapter work", goal: "Expose a blocker.", acceptance: ["The blocker is durable"] });
+    const feature = await repo.createFeature({ title: "Blocked adapter work", goal: "Expose a blocker.", acceptance: ["The blocker is durable"], verification: { commands: [{ name: "pass", run: "true" }] } });
     const registry = new ExecutionAdapterRegistry([new DeterministicExecutionAdapter({ outcome: "blocked", summary: "Needs credentials.", reason: "Credentials are unavailable." })]);
 
     const result = await repo.executeFeature(feature.id, registry);
@@ -38,7 +38,7 @@ describe("execution adapters", () => {
 
   it("does not move a Feature when no adapter is available", async () => {
     const { repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "No adapter", goal: "Remain safe.", acceptance: ["It stays ready"] });
+    const feature = await repo.createFeature({ title: "No adapter", goal: "Remain safe.", acceptance: ["It stays ready"], verification: { commands: [{ name: "pass", run: "true" }] } });
 
     const result = await repo.executeFeature(feature.id, new ExecutionAdapterRegistry());
 
@@ -49,7 +49,7 @@ describe("execution adapters", () => {
 
   it("refreshes path-bound execution profiles after ready moves to doing", async () => {
     const { repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "Spec Flow adapter", goal: "Keep paths valid after transition.", acceptance: ["The active spec path is used"] });
+    const feature = await repo.createFeature({ title: "Spec Flow adapter", goal: "Keep paths valid after transition.", acceptance: ["The active spec path is used"], verification: { commands: [{ name: "pass", run: "true" }] } });
     await fs.writeFile(path.join(feature.path, "spec.md"), "# Spec Flow\n");
     await fs.mkdir(path.join(feature.path, "tickets"));
 

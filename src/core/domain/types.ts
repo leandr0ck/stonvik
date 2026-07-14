@@ -6,31 +6,34 @@ export interface InboxItem {
   id: string;
   source: string;
   created: string;
-  status: "captured" | "drafted" | "promoted" | "merged" | "deferred";
+  status: "captured" | "needs_definition" | "promoted" | "merged" | "deferred" | "rejected";
   title: string;
   body?: string;
   path: string;
-  draftRef?: string;
+  definitionRef?: string;
+  definitionKind?: "spec" | "adr";
   featureRef?: string;
+  classification?: Classification;
 }
 
-export interface DraftFrontmatter {
-  schemaVersion: 1;
-  id: string;
-  created: string;
-  source: { type: string; ref: string };
-  title: string;
-  goal: string;
-  acceptance: string[];
-  constraints?: string[];
-}
+export type WorkSize = "XS" | "S" | "M" | "L" | "XL";
+export type ClassificationRoute = "auto_direct" | "ask_direct" | "ask_spec" | "ask_adr" | "split";
+export type ClassificationRisk = "public_api" | "persistence" | "security" | "external_integration" | "multi_package" | "unknown_impact";
 
-export interface Draft {
-  id: string;
-  slug: string;
-  path: string;
-  frontmatter: DraftFrontmatter;
-  body: string;
+export interface Classification {
+  route: ClassificationRoute;
+  size: WorkSize;
+  estimatedTouchedFiles: number;
+  complexityScore: number;
+  confidence: number;
+  risks: ClassificationRisk[];
+  rationale: string[];
+  proposed: {
+    title: string;
+    goal: string;
+    acceptance: string[];
+    verification: VerificationPolicy;
+  };
 }
 
 export interface FeatureManifest {
@@ -42,7 +45,8 @@ export interface FeatureManifest {
   goal: string;
   acceptance: string[];
   constraints?: string[];
-  verification?: VerificationPolicy;
+  verification: VerificationPolicy;
+  classification?: Classification;
 }
 
 export interface VerificationCommand {
@@ -64,7 +68,7 @@ export interface VerificationPolicy {
 
 export type ReceiptKind = "execution" | "verification" | "review" | "handoff";
 export type VerificationOutcome = "passed" | "failed" | "manual_required" | "not_configured" | "cancelled";
-export type ReviewDecision = "approved" | "changes_requested" | "blocked";
+export type ReviewDecision = "approved" | "changes_requested" | "blocked" | "needs_human";
 
 export interface ReceiptActor { type: string; name: string; version?: string }
 export interface ReceiptFeatureRef { id: string; manifestPath: string }
@@ -123,6 +127,7 @@ export interface ExecutionReceipt extends ReceiptBase {
   outcome: string;
   engine?: string;
   artifacts?: string[];
+  details?: Record<string, unknown>;
 }
 
 export type Receipt = VerificationReceipt | ReviewReceipt | HandoffReceipt | ExecutionReceipt;
@@ -151,7 +156,6 @@ export type ExecutionProfile =
 
 export interface RepositoryStatus {
   inbox: Record<string, number>;
-  drafts: number;
   features: Record<FeatureState, number>;
 }
 
@@ -175,6 +179,30 @@ export interface CreateFeatureInput {
   goal: string;
   acceptance: string[];
   constraints?: string[];
-  verification?: VerificationPolicy;
+  verification: VerificationPolicy;
+  classification?: Classification;
   source?: { type: string; ref: string };
+}
+
+export interface WorkReviewFinding {
+  severity: "critical" | "major" | "minor";
+  message: string;
+  reference?: string;
+}
+
+export interface WorkReviewDecision {
+  outcome: ReviewDecision;
+  summary: string;
+  findings: WorkReviewFinding[];
+  evidence: string[];
+}
+
+export interface RunEvent {
+  at: string;
+  type: "status" | "classification" | "transition" | "receipt" | "gate" | "stop";
+  workId?: string;
+  inboxId?: string;
+  state?: string;
+  message: string;
+  nextAction?: string;
 }

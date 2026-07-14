@@ -1,6 +1,6 @@
 # Forgium
 
-Forgium is a repository-native workflow engine for software-development agents. It keeps a durable, reviewable queue of work in your repository: raw requests go to an Inbox, approved work becomes a Feature, and a Feature moves through execution, review, completion, or a blocker.
+Forgium is a repository-native workflow engine for software-development agents. It keeps a durable, reviewable queue of work in your repository: raw requests go to an Inbox, approved intent becomes Work, and Work moves through execution, review, completion, or a blocker.
 
 The repository is the source of truth. Forgium does not require a database or a hosted service.
 
@@ -33,29 +33,24 @@ Run these commands from the root of the project you want Forgium to manage:
 # 1. Create the workflow directories.
 forgium init
 
-# 2. Capture an unprocessed request.
+# 2. Capture raw product intent.
 forgium capture "Add a WhatsApp contact button to the storefront"
 
-# 3. Turn approved work into an executable Feature.
-forgium feature create \
-  --title "Add WhatsApp contact button" \
-  --goal "Let storefront visitors contact the business on WhatsApp" \
-  --acceptance "A WhatsApp button is visible on the storefront" \
-               "The button opens the configured WhatsApp conversation"
+# 3. Run the autonomous loop. It classifies, implements, verifies, and
+#    independently reviews eligible Work.
+forgium run
 
-# 4. Start the next ready Feature.
-forgium work
-
-# 5. After implementation, submit it for review and complete it.
-forgium feature submit feature-add-whatsapp-contact-button
-forgium review feature-add-whatsapp-contact-button
+# 4. If Forgium asks for a Spec/ADR, complete the document and run again.
+# 5. Inspect progress; Forgium never self-approves.
+forgium status --verbose
 ```
 
-Use `forgium status` at any time to see the number of Inbox items and Features in each state.
+Use `forgium status` at any time to see the number of Inbox items and Work
+items in each state.
 
 ## The Loop method
 
-Forgium is designed to run the same bounded work loop repeatedly. The
+Forgium is designed to run the same autonomous work loop repeatedly. The
 repository is the durable queue and source of truth; each pass selects work,
 delegates implementation, records evidence, and stops at an explicit gate.
 
@@ -63,55 +58,43 @@ delegates implementation, records evidence, and stops at an explicit gate.
 raw request
     │
     ▼
- Inbox ──triage──▶ Draft ──promote──▶ Ready
-                                      │
-                              select oldest eligible
-                                      │
-                                      ▼
-                                   Doing
-                                      │
-                         execution + verification
-                                      │
-                                      ▼
-                                   Review
-                                  ╱      ╲
-                           approve        changes/block
-                              │              │
-                              ▼              ▼
-                            Done       Doing / Blocked
-                                             │
-                                      unblock → Ready
+ Inbox ──human interview──▶ ready Work ──implement──▶ doing
+    │             │                                      │
+    │             └── Spec or ADR ──human confirms──┘    │
+    │                                                     ▼
+    │                                              verification
+    │                                                     │
+    │                                                     ▼
+    └─────────────────────────────────────────────── review
+                                                        │
+                                             approve ───┴─── changes/block
+                                                │                   │
+                                                ▼                   ▼
+                                              done            doing / blocked
 ```
 
 ### How one loop pass works
 
 1. **Capture** — record raw intent in `product/inbox/`. Inbox content is not
    executable work.
-2. **Triage** — deliberately clarify, edit, defer, merge, or promote the
-   request. Incomplete work becomes a Draft, never an executable Feature.
-3. **Prepare** — promote a valid Draft, or create a Feature directly. A
-   Feature in `features/ready/` has a valid manifest, goal, and acceptance
-   criteria.
-4. **Select** — choose the oldest eligible ready Feature unless an explicit
-   limit or future priority policy says otherwise.
-5. **Execute** — move the complete Feature directory to `doing/` and delegate
-   it to the selected engine:
-   - `direct`: Pi implements the Feature directly;
-   - `spec-flow`: Pi delegates ticket ordering, handoffs, and checkpoints to
-     `pi-spec-flow`.
-6. **Verify** — record execution and verification receipts. A successful
-   implementation moves the Feature to `review`; it does not approve itself.
-7. **Review** — an explicit review decision moves the Feature to `done`, back
-   to `doing`, or `blocked`.
-8. **Resume** — a blocked Feature returns to `ready` only after its blocker is
-   resolved; the next loop pass can then select it again.
+2. **Product interview** — `forgium run` or `forgium triage` asks a human to
+   classify the Inbox item. A simple request becomes ready Work; a complex
+   request creates a human-authored Spec or ADR first.
+3. **Prepare** — every ready Work has a title, goal, acceptance criteria, and
+   either one or more verification commands or required manual evidence.
+4. **Implement** — `forgium implement` observes `pi-spec-flow`; it does not
+   control that extension's ticket lifecycle. A partial result stays `doing`.
+5. **Verify** — only a complete Spec Flow observation runs the Work's
+   verification policy and may move Work to `review`.
+6. **Review** — an explicit human decision moves Work to `done`, back to
+   `doing`, or to `blocked`.
 
 ### Loop safety rules
 
-- `forgium run` is bounded: by default it processes at most one Feature.
-- `--max-features` and `--until-empty` do not bypass human gates or review.
-- There are no unlimited retries, parallel execution, or LLM auto-approval.
-- Feature transitions move the complete directory; individual Spec Flow
+- `forgium run` is the normal end-to-end path; `triage`, `implement`, and
+  `review` remain manual recovery APIs.
+- There is no automatic approval, retry, or transition from `doing` to `done`.
+- Work transitions move the complete directory; individual Spec Flow
   tickets remain owned by `pi-spec-flow`.
 - Receipts and repository artifacts are durable; leases and process logs under
   `.forgium/runtime/` are local runtime metadata.
@@ -122,20 +105,24 @@ raw request
 
 ```text
 product/
-└── inbox/                  # Raw, untriaged requests
+├── inbox/                  # Raw product intent
+├── inbox-receipts/         # Classification evidence
+└── events/                 # Durable RunEvent NDJSON
 
 features/
-├── draft/                  # Propuestas incompletas o pendientes de aprobación
-├── ready/                  # Approved work waiting to start
+├── definition/             # Human Spec/ADR definitions; never executable
+├── ready/                  # Executable Work waiting for implementation
 ├── doing/                  # Work in progress
 ├── review/                 # Work awaiting review
 ├── blocked/                # Work that cannot proceed
 └── done/                   # Completed work
 ```
 
-It also adds `.forgium/runtime/` to `.gitignore`. Runtime leases created when work starts are local process metadata; the Inbox and Feature directories are intended to be committed to Git. The runtime directory is created only when it is needed.
+It also adds `.forgium/runtime/` to `.gitignore`. Runtime leases created when work starts are local process metadata; the Inbox and Work directories are intended to be committed to Git. The runtime directory is created only when it is needed.
 
-Each Feature is a directory containing at least a `manifest.yaml`. You can add supporting artifacts to that directory, such as `spec.md`, `tickets/`, `notes.md`, or `research.md`.
+Each Work item is a directory containing at least a `manifest.yaml`. You can
+add supporting artifacts to it, such as `spec.md`, `tickets/`, `notes.md`, or
+`research.md`.
 
 ## Typical workflow
 
@@ -164,101 +151,76 @@ List captured requests with:
 forgium inbox
 ```
 
-> In this version, Inbox triage and promotion are deliberate human/agent steps. `forgium capture` records raw intent; use `forgium feature create` when that intent has been approved and defined well enough to execute.
+Use `forgium run` (or `forgium triage`) to interview and classify captured
+intent. Forgium is the only command that promotes Inbox content to ready Work.
 
-### 2. Create a Feature
+### 2. Create ready Work directly
 
-A Feature must have a title, a goal, and at least one acceptance criterion:
+Use this only when the Work is already defined. It must include at least one
+verification command or a required piece of manual evidence:
 
 ```bash
-forgium feature create \
+forgium work create \
   --title "Export invoices as CSV" \
   --goal "Allow finance users to download invoice data for reconciliation" \
   --acceptance "Users can export filtered invoices as a CSV file" \
                "The export includes invoice number, date, customer, and amount" \
-  --constraint "Do not change the existing invoice API"
+  --constraint "Do not change the existing invoice API" \
+  --verify-command "npm test -- --runInBand"
 ```
 
-Forgium creates the Feature in `features/ready/`. Its ID is derived from the title (for example, `feature-export-invoices-as-csv`). Supply `--slug <slug>` when you need a different directory name and ID suffix:
+Or require evidence that cannot be expressed as a command:
 
 ```bash
-forgium feature create \
-  --slug invoice-csv-export \
-  --title "Export invoices as CSV" \
-  --goal "Enable invoice exports" \
-  --acceptance "A CSV export can be downloaded"
+forgium work create \
+  --title "Update the pricing page" \
+  --goal "Publish approved pricing copy" \
+  --acceptance "The new plan names are visible" \
+  --manual-evidence "The new plan names are visible:browser-review"
 ```
 
-List all Features or only one state:
+List Work, optionally by state:
 
 ```bash
-forgium feature list
-forgium feature list --state ready
+forgium work list
+forgium work list --state ready
 ```
 
-### 3. Execute work
+### 3. Implement spec-driven Work
 
-Start the oldest ready Feature explicitly:
+Install the Spec Flow extension once:
 
 ```bash
-forgium feature start feature-export-invoices-as-csv
-```
-
-Or let Forgium select and start the next ready Feature:
-
-```bash
-forgium work
-```
-
-Starting a Feature moves it from `ready` to `doing` and creates a local runtime lease. `forgium work` also prints the execution profile:
-
-- **direct** — implement the Feature directly with your agent or normal development workflow.
-- **spec-needs-plan** — a `spec.md` exists but no `tickets/` directory exists. Forgium prints the `pi-spec-flow` command to plan tickets.
-- **spec-flow** — both `spec.md` and `tickets/` exist. Forgium prints the command to continue implementation with `pi-spec-flow`.
-
-You can inspect this profile without starting work:
-
-```bash
-forgium feature profile feature-export-invoices-as-csv
-```
-
-For a Feature containing `spec.md`, the suggested Pi commands are:
-
-```text
-/spec-flow-init <path-to-spec.md>
-/spec-flow-implement <path-to-spec.md>
-/spec-flow-next <path-to-spec.md>
-```
-
-### Ejecución automatizada opt-in
-
-`forgium run` puede delegar la implementación a Pi. Elige el engine de forma
-explícita; Forgium conserva los receipts, la verificación y la transición a
-`review`.
-
-```bash
-# Features directas.
-forgium run --engine pi
-
-# Features con spec.md y tickets/.
-# Instala la extensión una vez si vas a usar este engine:
 pi install npm:pi-spec-flow@0.4.8
-forgium run --engine pi-spec-flow
 ```
 
-El adapter de Spec Flow responde la confirmación del ticket ya seleccionado,
-pero no aprueba el trabajo: una Feature completada sigue necesitando la review
-explícita de Forgium para llegar a `done`.
+Work needs a `spec.md` and its Spec Flow tickets. Then invoke Forgium:
+
+```bash
+forgium implement feature-export-invoices-as-csv
+```
+
+Without an ID, `forgium implement` resumes the only Work already `doing`, or
+selects the next ready Work. If more than one Work is `doing`, it refuses to
+guess and requires an explicit ID. Pi/Spec Flow may pause for a checkpoint or
+code review; rerun the same command after that action has occurred.
+
+```bash
+forgium status --verbose
+```
+
+`--verbose` reports the latest observed Spec Flow status and the next human
+action. If Pi does not return structured status, Forgium fails closed: Work
+remains `doing` with a durable handoff receipt.
+
+Use `forgium run --watch` to keep a local process waiting for durable Inbox,
+definition, manifest, ticket, or receipt changes. With `--json --watch`, output
+is newline-delimited JSON only.
 
 ### 4. Review, complete, or unblock
 
-When implementation is ready, send the Feature to review:
-
-```bash
-forgium feature submit feature-export-invoices-as-csv
-```
-
-After review, use one of the following:
+When implementation has completed verification and reached `review`, use one
+of the following:
 
 ```bash
 # Approve and move review → done.
@@ -267,21 +229,12 @@ forgium review feature-export-invoices-as-csv
 # Send review → doing for another implementation pass.
 forgium review feature-export-invoices-as-csv --fail
 
-# Record a blocker and move doing/review → blocked.
-forgium feature block feature-export-invoices-as-csv \
-  --reason "Awaiting approval from the finance team"
-
-# Equivalent review-time blocker command.
+# Block review → blocked.
 forgium review feature-export-invoices-as-csv \
   --block "Awaiting approval from the finance team"
-
-# Once resolved, move blocked → ready.
-forgium feature unblock feature-export-invoices-as-csv
 ```
 
-Blocking appends the reason and timestamp to the Feature's `notes.md`.
-
-## Feature lifecycle
+## Work lifecycle
 
 Forgium enforces these transitions:
 
@@ -293,30 +246,23 @@ ready → doing → review → done
 review → doing  (review needs more work)
 ```
 
-A completed Feature cannot be moved to another state through the CLI. Use Feature IDs or directory slugs with lifecycle commands; both are accepted.
+A completed Work cannot be moved to another state through the CLI.
 
 ## Command reference
 
 | Command | Purpose |
 | --- | --- |
-| `forgium init` | Initialize the Inbox, Draft, and Feature state directories. |
+| `forgium init` | Initialize Inbox and Work state directories. |
 | `forgium capture [text...]` | Save a raw Inbox item. Reads piped standard input when no text is supplied. |
 | `forgium inbox` | List Inbox items. |
-| `forgium triage [--non-interactive] [--edit] [--dry-run]` | Resolve Drafts and triage captured Inbox items. |
-| `forgium run [--max-features <n> | --until-empty] [--engine pi|pi-spec-flow]` | Run the bounded repository loop. Agent execution is opt-in. |
-| `forgium status` | Show counts by Inbox, Draft, and Feature state. |
-| `forgium validate` | Validate required directories and Inbox/Draft/Feature file schemas. Returns exit code `2` when invalid. |
-| `forgium feature create ...` | Create a ready Feature. |
-| `forgium feature list [--state <state>]` | List Features, optionally filtering by `ready`, `doing`, `review`, `blocked`, or `done`. |
-| `forgium feature start <id>` | Move `ready` → `doing`. |
-| `forgium feature submit <id>` | Move `doing` → `review`. |
-| `forgium feature complete <id>` | Move `review` → `done`. |
-| `forgium feature block <id> --reason <reason>` | Move `doing` or `review` → `blocked` and record the reason. |
-| `forgium feature unblock <id>` | Move `blocked` → `ready`. |
-| `forgium feature profile <id>` | Show whether a Feature is direct or `pi-spec-flow` work. |
-| `forgium feature verify <id>` | Run configured checks and record a verification receipt. |
-| `forgium work` | Start the next ready Feature and show its execution profile. |
-| `forgium review <id> [--fail \| --block <reason>]` | Complete a Feature in review, return it to `doing`, or block it. |
+| `forgium triage [--non-interactive] [--dry-run]` | Interview and classify captured Inbox items. |
+| `forgium run [--watch] [--non-interactive] [--dry-run]` | Run the autonomous product, implementation, verification, and review loop. |
+| `forgium status [--verbose]` | Show state counts; verbose includes implementation observations. |
+| `forgium validate` | Validate required directories and Inbox/Work schemas. Returns exit code `2` when invalid. |
+| `forgium work create ...` | Create ready Work; verification command or manual evidence is required. |
+| `forgium work list [--state <state>]` | List Work, optionally filtering by lifecycle state. |
+| `forgium implement [id] [--engine pi-spec-flow]` | Start or observe Spec Flow implementation. |
+| `forgium review <id> [--fail \| --block <reason>]` | Approve Work in review, return it to `doing`, or block it. |
 
 Run `forgium <command> --help` for the CLI's current argument and option details.
 
@@ -332,17 +278,18 @@ Pass `--json` to emit machine-readable results, which is useful for scripts and 
 
 ```bash
 forgium --json status
-forgium --json feature list --state ready
+forgium --json work list --state ready
 ```
 
 When Forgium reports an error in JSON mode, it writes an object with an error code and message to standard error.
 
 ## Keep workflow state portable
 
-Run validation after manually editing Inbox items, Feature manifests, or Feature artifacts:
+Run validation after manually editing Inbox items, Work manifests, or Work artifacts:
 
 ```bash
 forgium validate
 ```
 
-Commit the resulting `product/` and `features/` changes with the work they describe, so the queue and lifecycle remain portable and auditable.
+Commit the resulting `product/` and `features/` changes with the work they
+describe, so the queue and lifecycle remain portable and auditable.

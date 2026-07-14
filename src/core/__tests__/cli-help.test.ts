@@ -12,17 +12,18 @@ describe("CLI command surface", () => {
 
     expect(stdout).toContain("triage");
     expect(stdout).toContain("run");
-    expect(stdout).toContain("feature");
+    expect(stdout).toContain("work");
+    expect(stdout).toContain("implement");
 
     const { stdout: runHelp } = await execFile(process.execPath, [tsx, cliPath, "run", "--help"], { cwd: process.cwd() });
-    expect(runHelp).toContain("pi-spec-flow");
+    expect(runHelp).not.toContain("--engine");
   });
 
-  it("exposes verification under Feature help", async () => {
+  it("exposes Work creation", async () => {
     const cliPath = `${process.cwd()}/src/cli/index.ts`;
     const tsx = `${process.cwd()}/node_modules/tsx/dist/cli.mjs`;
-    const { stdout } = await execFile(process.execPath, [tsx, cliPath, "feature", "--help"], { cwd: process.cwd() });
+    const { stdout } = await execFile(process.execPath, [tsx, cliPath, "work", "create", "--help"], { cwd: process.cwd() });
 
-    expect(stdout).toContain("verify");
+    expect(stdout).toContain("--verify-command");
   });
 });

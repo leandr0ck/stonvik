@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import path from "node:path";
+import fs from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { spawn } from "node:child_process";
 import { Command } from "commander";
-import { EditorUnavailableError, ExecutionAdapterRegistry, FilesystemForgiumRepository, ForgiumError, InvalidDraftError, PiRpcExecutionAdapter, RunOptionsInvalidError, SpecFlowExecutionAdapter, findRepositoryRoot, type Draft, type FeatureState } from "../core/index.js";
+import { AgentLoop, ExecutionAdapterRegistry, FilesystemForgiumRepository, ForgiumError, SpecFlowExecutionAdapter, findRepositoryRoot, type Classification, type FeatureState, type InboxItem, type RunEvent } from "../core/index.js";
 
 interface GlobalOptions { root?: string; json?: boolean }
 
@@ -11,7 +11,7 @@ const program = new Command();
 program
   .name("forgium")
   .description("Repository-native workflow engine for software development agents")
-  .version("0.1.0")
+  .version("1.0.0")
   .option("--root <path>", "repository root override")
   .option("--json", "emit JSON output");
 
@@ -44,33 +44,33 @@ program.command("inbox")
   });
 
 program.command("triage")
-  .description("Resolve Drafts and triage captured Inbox items")
+  .description("Classify captured Inbox items into executable Work")
   .option("--non-interactive", "never prompt or approve captured Inbox items")
-  .option("--edit", "open each Draft in the configured editor")
   .option("--dry-run", "show the next action without writing")
-  .action(async (opts: { nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }) => {
+  .action(async (opts: { nonInteractive?: boolean; dryRun?: boolean }) => {
     const repo = await repoForCommand();
     const result = await triage(repo, opts);
     output(result, renderTriage(result));
   });
 
 program.command("run")
-  .description("Run the bounded repository workflow loop")
-  .option("--max-features <n>", "maximum number of Features", (value: string) => value)
-  .option("--until-empty", "continue until no eligible work remains")
-  .option("--engine <engine>", "execution engine (pi or pi-spec-flow)")
+  .description("Run the autonomous product, implementation, verification, and review loop")
   .option("--non-interactive", "never prompt or approve captured Inbox items")
-  .option("--edit", "open each Draft in the configured editor")
   .option("--dry-run", "show planned actions without writing")
-  .action(async (opts: { maxFeatures?: string; untilEmpty?: boolean; engine?: string; nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }) => {
+  .option("--watch", "wait for durable changes and resume the loop")
+  .action(async (opts: { nonInteractive?: boolean; dryRun?: boolean; watch?: boolean }) => {
     const repo = await repoForCommand();
     let interrupted = false;
-    const onInterrupt = () => { interrupted = true; };
+    const controller = new AbortController();
+    const onInterrupt = () => { interrupted = true; controller.abort(); };
     process.once("SIGINT", onInterrupt);
     process.once("SIGTERM", onInterrupt);
     try {
-      const result = await runLoop(repo, opts, () => interrupted);
-      output(result, renderRun(result));
+      if (opts.watch) await watchLoop(repo, { ...opts, signal: controller.signal }, () => interrupted);
+      else {
+        const result = await runLoop(repo, { ...opts, signal: controller.signal }, () => interrupted);
+        output(result, renderRun(result));
+      }
     } finally {
       process.removeListener("SIGINT", onInterrupt);
       process.removeListener("SIGTERM", onInterrupt);
@@ -79,10 +79,25 @@ program.command("run")
 
 program.command("status")
   .description("Show repository workflow status")
-  .action(async () => {
+  .option("--verbose", "include implementation observations")
+  .action(async (opts: { verbose?: boolean }) => {
     const repo = await repoForCommand();
     const status = await repo.getStatus();
-    output(status, renderStatus(status));
+    const implementations = opts.verbose
+      ? await Promise.all((await repo.listFeatures()).filter((feature) => feature.state === "doing" || feature.state === "review").map(async (feature) => {
+        const receipts = await repo.listReceipts(feature.id);
+        const execution = [...receipts].reverse().find((receipt) => receipt.kind === "execution");
+        const handoff = [...receipts].reverse().find((receipt) => receipt.kind === "handoff");
+        return {
+          id: feature.id,
+          state: feature.state,
+          observation: execution?.kind === "execution" ? execution.details?.specFlow : undefined,
+          nextAction: feature.state === "review" ? "Review the completed Work." : handoff?.kind === "handoff" ? handoff.reason : "Observe implementation again.",
+        };
+      }))
+      : undefined;
+    const data = implementations ? { ...status, implementations } : status;
+    output(data, renderStatus(status, implementations));
   });
 
 program.command("validate")
@@ -94,63 +109,53 @@ program.command("validate")
     if (!report.valid) process.exitCode = 2;
   });
 
-const feature = program.command("feature").description("Feature lifecycle utilities");
-feature.command("create")
-  .description("Create a ready Feature manifest")
+const work = program.command("work").description("Product Work utilities");
+work.command("create")
+  .description("Create a ready Work manifest")
   .requiredOption("--title <title>", "Feature title")
   .requiredOption("--goal <goal>", "Feature goal")
   .requiredOption("--acceptance <criteria...>", "Acceptance criteria; repeat values after the flag")
   .option("--constraint <constraints...>", "Constraints")
   .option("--slug <slug>", "Feature slug")
-  .action(async (opts: { title: string; goal: string; acceptance: string[]; constraint?: string[]; slug?: string }) => {
+  .option("--verify-command <command>", "Verification command; repeat for multiple commands", collectOption, [])
+  .option("--manual-evidence <criterion:kind>", "Manual evidence requirement; repeat for multiple entries", collectOption, [])
+  .action(async (opts: { title: string; goal: string; acceptance: string[]; constraint?: string[]; slug?: string; verifyCommand: string[]; manualEvidence: string[] }) => {
     const repo = await repoForCommand();
-    const created = await repo.createFeature({ title: opts.title, goal: opts.goal, acceptance: opts.acceptance, constraints: opts.constraint, slug: opts.slug });
+    const verification = buildVerification(opts.verifyCommand, opts.manualEvidence);
+    const input = { title: opts.title, goal: opts.goal, acceptance: opts.acceptance, constraints: opts.constraint, slug: opts.slug, verification };
+    const created = await repo.createFeature(input);
     output(created, `Created ${created.id}\n${relative(repo.root, created.path)}`);
   });
-feature.command("list")
-  .description("List Features")
+work.command("list")
+  .description("List Work")
   .option("--state <state>", "state filter")
   .action(async (opts: { state?: FeatureState }) => {
     const repo = await repoForCommand();
     const features = await repo.listFeatures(opts.state);
-    output(features, features.length ? features.map((f) => `${f.id}\t${f.state}\t${f.manifest.created}\t${f.manifest.title}`).join("\n") : "No Features found");
+    output(features, features.length ? features.map((f) => `${f.id}\t${f.state}\t${f.manifest.created}\t${f.manifest.title}`).join("\n") : "No Work found");
   });
-feature.command("start <id>").action(async (id: string) => transition(id, "startFeature", "Started"));
-feature.command("submit <id>").description("Move doing → review").action(async (id: string) => transition(id, "submitForReview", "Submitted for review"));
-feature.command("complete <id>").description("Move review → done").action(async (id: string) => transition(id, "completeFeature", "Completed"));
-feature.command("block <id>").requiredOption("--reason <reason>").description("Move doing/review → blocked").action(async (id: string, opts: { reason: string }) => {
-  const repo = await repoForCommand();
-  const result = await repo.blockFeature(id, opts.reason);
-  output(result, `Blocked ${result.id}\n${relative(repo.root, result.path)}`);
-});
-feature.command("unblock <id>").description("Move blocked → ready").action(async (id: string) => transition(id, "unblockFeature", "Unblocked"));
-feature.command("profile <id>").description("Inspect Feature execution profile").action(async (id: string) => {
-  const repo = await repoForCommand();
-  const profile = await repo.inspectExecutionMode(id);
-  output(profile, JSON.stringify(profile, null, 2));
-});
-feature.command("verify <id>").description("Run configured verification checks").action(async (id: string) => {
-  const repo = await repoForCommand();
-  const receipt = await repo.verifyFeature(id);
-  output(receipt, `Verification ${receipt.outcome}\nReceipt ${receipt.id}`);
-});
 
-program.command("work")
-  .description("Select the next ready Feature and prepare it for execution")
-  .action(async () => {
+program.command("implement [id]")
+  .description("Start or observe a spec-driven implementation without controlling its internal ticket flow")
+  .option("--engine <engine>", "implementation engine", "pi-spec-flow")
+  .action(async (id: string | undefined, opts: { engine: string }) => {
+    if (opts.engine !== "pi-spec-flow") throw new ForgiumError(`Unsupported implementation engine: ${opts.engine}`, "IMPLEMENT_ENGINE_INVALID", 2);
     const repo = await repoForCommand();
-    const next = await repo.getNextReady();
-    if (!next) return output({ status: "idle" }, "No ready Features");
-    const doing = await repo.startFeature(next.id);
-    const profile = await repo.inspectExecutionMode(doing.id);
-    output({ status: "started", feature: doing, profile }, `Started ${doing.id}\nProfile: ${profile.kind}${renderProfileHint(profile)}`);
+    const active = await repo.listFeatures("doing");
+    if (!id && active.length > 1) throw new ForgiumError("Multiple Work items are in progress. Pass an explicit Work ID.", "IMPLEMENT_SELECTION_REQUIRED", 2);
+    const feature = id ? await repo.getFeature(id) : active[0] ?? await repo.getNextReady();
+    if (!feature) return output({ status: "idle" }, "No Work is ready or in progress");
+    const result = await repo.executeFeature(feature.id, new ExecutionAdapterRegistry([new SpecFlowExecutionAdapter()]));
+    output(
+      { outcome: result.outcome, summary: result.summary, details: result.details, feature: result.feature },
+      `Implementation ${result.feature.id}\n  State: ${result.feature.state}\n  Outcome: ${result.outcome}\n  ${result.summary}`,
+    );
   });
 
-program.command("review")
-  .description("Mark a review Feature done, or send it back to doing/blocked")
-  .argument("<id>")
-  .option("--fail", "send review back to doing")
-  .option("--block <reason>", "block the Feature")
+program.command("review <id>")
+  .description("Record an explicit implementation review decision")
+  .option("--fail", "send Work back to doing")
+  .option("--block <reason>", "block Work with a reason")
   .action(async (id: string, opts: { fail?: boolean; block?: string }) => {
     const repo = await repoForCommand();
     const result = opts.block
@@ -178,224 +183,291 @@ async function repoForCommand(): Promise<FilesystemForgiumRepository> {
   return new FilesystemForgiumRepository(root);
 }
 
-async function transition(id: string, method: "startFeature" | "submitForReview" | "completeFeature" | "unblockFeature", label: string) {
-  const repo = await repoForCommand();
-  const result = await repo[method](id);
-  output(result, `${label} ${result.id}\n${relative(repo.root, result.path)}`);
-}
-
 function output(data: unknown, human: string): void { if (program.opts<GlobalOptions>().json) console.log(JSON.stringify(data, null, 2)); else console.log(human); }
 function relative(root: string, p: string): string { return path.relative(root, p) || "."; }
-function renderStatus(status: Awaited<ReturnType<FilesystemForgiumRepository["getStatus"]>>): string {
-  return `Inbox\n  captured: ${status.inbox.captured ?? 0}\n  drafted: ${status.inbox.drafted ?? 0}\n  promoted: ${status.inbox.promoted ?? 0}\n  merged: ${status.inbox.merged ?? 0}\n  deferred: ${status.inbox.deferred ?? 0}\n\nDrafts\n  total: ${status.drafts}\n\nFeatures\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}\n  done: ${status.features.done}`;
+function renderStatus(status: Awaited<ReturnType<FilesystemForgiumRepository["getStatus"]>>, implementations?: Array<{ id: string; state: FeatureState; observation?: unknown; nextAction: string }>): string {
+  const details = implementations?.length ? `\n\nImplementation\n${implementations.map((item) => `  ${item.id}: ${item.state} — ${item.nextAction}`).join("\n")}` : "";
+  return `Inbox\n  captured: ${status.inbox.captured ?? 0}\n  needs definition: ${status.inbox.needs_definition ?? 0}\n  promoted: ${status.inbox.promoted ?? 0}\n  merged: ${status.inbox.merged ?? 0}\n  deferred: ${status.inbox.deferred ?? 0}\n  rejected: ${status.inbox.rejected ?? 0}\n\nWork\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}\n  done: ${status.features.done}${details}`;
 }
 
-interface TriageOptions { nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }
-interface TriageAction { kind: "draft" | "inbox"; id: string; action: string }
+interface TriageOptions { nonInteractive?: boolean; dryRun?: boolean }
+interface TriageAction { kind: "inbox"; id: string; action: string; definitionRef?: string; definitionKind?: "spec" | "adr" }
 interface TriageResult { root: string; actions: TriageAction[]; stopReason: string }
-interface RunOptions { maxFeatures?: string; untilEmpty?: boolean; engine?: string; nonInteractive?: boolean; edit?: boolean; dryRun?: boolean }
+interface RunOptions { nonInteractive?: boolean; dryRun?: boolean; watch?: boolean; signal?: AbortSignal }
 interface RunFeature { id: string; state: FeatureState; action: string }
-interface RunResult { root: string; actions: TriageAction[]; features: RunFeature[]; stopReason: string }
+interface RunResult { root: string; actions: TriageAction[]; features: RunFeature[]; stopReason: string; nextAction?: string; events?: RunEvent[] }
 
 async function triage(repo: FilesystemForgiumRepository, options: TriageOptions): Promise<TriageResult> {
   const result: TriageResult = { root: repo.root, actions: [], stopReason: "no_actionable_work" };
-  const drafts = await repo.listDrafts();
   const inbox = await repo.listInbox();
+  const prompt = createPromptSession();
 
-  for (const draft of drafts) {
-    if (options.dryRun) {
-      result.actions.push({ kind: "draft", id: draft.id, action: "needs_input" });
-      result.stopReason = "dry_run";
-      continue;
-    }
-    if (options.nonInteractive) {
-      try {
-        await repo.promoteDraft(draft.id);
-        result.actions.push({ kind: "draft", id: draft.id, action: "promoted" });
-      } catch (error) {
-        if (!(error instanceof InvalidDraftError)) throw error;
-        result.actions.push({ kind: "draft", id: draft.id, action: "needs_input" });
-        result.stopReason = "human_input_required";
-      }
-      continue;
-    }
-
-    let autoEdit = options.edit === true;
-    let resolved = false;
-    while (!resolved) {
-      if (autoEdit) {
-        await openEditor(draft);
-        result.actions.push({ kind: "draft", id: draft.id, action: "edited" });
-        autoEdit = false;
+  try {
+    for (const item of inbox.filter((candidate) => candidate.status === "needs_definition")) {
+      if (options.dryRun) {
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition_confirmation", definitionRef: item.definitionRef, definitionKind: item.definitionKind });
+        result.stopReason = "dry_run";
         continue;
       }
-      const action = await ask(`Draft ${draft.id}: [e]ditar [p]romover [s]altar [q]salir `);
-      if (action === "e") {
-        await openEditor(draft);
-        result.actions.push({ kind: "draft", id: draft.id, action: "edited" });
-      } else if (action === "p") {
-        try {
-          await repo.promoteDraft(draft.id);
-          result.actions.push({ kind: "draft", id: draft.id, action: "promoted" });
-          resolved = true;
-        } catch (error) {
-          if (!(error instanceof InvalidDraftError)) throw error;
-          result.actions.push({ kind: "draft", id: draft.id, action: "needs_input" });
-          resolved = true;
-        }
+      if (options.nonInteractive) {
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition_confirmation", definitionRef: item.definitionRef, definitionKind: item.definitionKind });
+        result.stopReason = "human_definition_required";
+        continue;
+      }
+      const action = await prompt.ask(`${item.definitionKind?.toUpperCase()} ${item.definitionRef}: [c]onfirmar Work [s]altar [q]salir `, true);
+      if (action === "c") {
+        const work = await repo.confirmDefinitionForInbox(item.id);
+        result.actions.push({ kind: "inbox", id: item.id, action: `definition_confirmed:${work.id}` });
       } else if (action === "q") {
         result.stopReason = "user_quit";
         return result;
       } else {
-        result.actions.push({ kind: "draft", id: draft.id, action: "skipped" });
-        resolved = true;
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition_confirmation", definitionRef: item.definitionRef, definitionKind: item.definitionKind });
+        result.stopReason = "human_definition_required";
       }
     }
-  }
 
-  for (const item of inbox.filter((candidate) => candidate.status === "captured")) {
-    if (options.dryRun) {
-      result.actions.push({ kind: "inbox", id: item.id, action: "needs_approval" });
-      result.stopReason = "dry_run";
-      continue;
-    }
-    if (options.nonInteractive) {
-      result.actions.push({ kind: "inbox", id: item.id, action: "needs_approval" });
-      result.stopReason = "human_input_required";
-      continue;
-    }
-
-    const action = await ask(`Inbox ${item.id} (${item.title}): [a]probar [d]iferir [m]ezclar [s]altar [q]salir `);
-    if (action === "a") {
-      const draft = await repo.createDraftFromInbox(item.id);
-      result.actions.push({ kind: "inbox", id: item.id, action: "drafted" });
-      if (options.edit) {
-        await openEditor(draft);
-        result.actions.push({ kind: "draft", id: draft.id, action: "edited" });
-      } else if ((await ask(`Draft ${draft.id}: [e]ditar [c]ontinuar `)) === "e") {
-        await openEditor(draft);
-        result.actions.push({ kind: "draft", id: draft.id, action: "edited" });
+    for (const item of inbox.filter((candidate) => candidate.status === "captured")) {
+      if (options.dryRun) {
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_classification" });
+        result.stopReason = "dry_run";
+        continue;
       }
-    } else if (action === "d") {
-      await repo.deferInbox(item.id);
-      result.actions.push({ kind: "inbox", id: item.id, action: "deferred" });
-    } else if (action === "m") {
-      const featureId = await ask("Feature destino: ");
-      await repo.mergeInbox(item.id, featureId);
-      result.actions.push({ kind: "inbox", id: item.id, action: `merged:${featureId}` });
-    } else if (action === "q") {
-      result.stopReason = "user_quit";
-      return result;
-    } else {
-      result.actions.push({ kind: "inbox", id: item.id, action: "skipped" });
+      if (options.nonInteractive) {
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_classification" });
+        result.stopReason = "human_input_required";
+        continue;
+      }
+
+      const action = await prompt.ask(`Inbox ${item.id} (${item.title}): [t]icket [s]pec requerida [a]dr requerida [d]iferir [r]echazar [m]ezclar [q]salir `, true);
+      if (action === "s" || action === "a") {
+        const definitionKind = action === "s" ? "spec" : "adr";
+        const needsDefinition = await repo.requireDefinitionForInbox(item.id, definitionKind, !process.env.FORGIUM_PI_COMMAND);
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition", definitionRef: needsDefinition.definitionRef, definitionKind });
+      } else if (action === "t") {
+        const definition = await defineWork(prompt.ask);
+        if (!definition) {
+          result.actions.push({ kind: "inbox", id: item.id, action: "needs_input" });
+          result.stopReason = "human_input_required";
+          return result;
+        }
+        const work = await repo.createFeatureFromInbox(item.id, { title: item.title, ...definition });
+        result.actions.push({ kind: "inbox", id: item.id, action: `created:${work.id}` });
+      } else if (action === "d") {
+        await repo.deferInbox(item.id);
+        result.actions.push({ kind: "inbox", id: item.id, action: "deferred" });
+      } else if (action === "r") {
+        await repo.rejectInbox(item.id);
+        result.actions.push({ kind: "inbox", id: item.id, action: "rejected" });
+      } else if (action === "m") {
+        const featureId = await prompt.ask("Feature destino: ");
+        await repo.mergeInbox(item.id, featureId);
+        result.actions.push({ kind: "inbox", id: item.id, action: `merged:${featureId}` });
+      } else if (action === "q") {
+        result.stopReason = "user_quit";
+        return result;
+      } else {
+        result.actions.push({ kind: "inbox", id: item.id, action: "skipped" });
+      }
     }
+  } finally {
+    prompt.close();
   }
 
-  if (result.stopReason === "no_actionable_work" && result.actions.some((action) => action.action === "needs_input" || action.action === "needs_approval")) {
+  if (result.stopReason === "no_actionable_work" && result.actions.some((action) => action.action === "needs_input" || action.action === "needs_classification")) {
     result.stopReason = "human_input_required";
   }
   return result;
 }
 
 async function runLoop(repo: FilesystemForgiumRepository, options: RunOptions, isInterrupted = () => false): Promise<RunResult> {
-  const maxFeatures = parseRunBudget(options);
-  if (options.engine !== undefined && !["pi", "pi-spec-flow"].includes(options.engine)) throw new RunOptionsInvalidError(`Unknown execution engine: ${options.engine}`);
-  const result: RunResult = { root: repo.root, actions: [], features: [], stopReason: "no_actionable_work" };
-  const report = await repo.validate();
-  if (isInterrupted()) {
-    result.stopReason = "interrupted";
-    return result;
+  // Without a configured agent, preserve a safe human-only recovery pass. The
+  // autonomous path is selected as soon as FORGIUM_PI_COMMAND is configured;
+  // no unstructured local process is treated as a state authority.
+  if (!process.env.FORGIUM_PI_COMMAND && !process.stdin.isTTY) {
+    const triageResult = await triage(repo, { nonInteractive: options.nonInteractive, dryRun: options.dryRun });
+    const ready = await repo.listFeatures("ready");
+    return {
+      root: repo.root,
+      actions: triageResult.actions,
+      features: ready.map((feature) => ({ id: feature.id, state: feature.state, action: "ready_for_implementation" })),
+      stopReason: options.dryRun ? "dry_run" : triageResult.actions.some((action) => action.action === "needs_definition" || action.action === "needs_definition_confirmation") ? "human_definition_required" : triageResult.stopReason === "no_actionable_work" && ready.length ? "ready_for_implementation" : triageResult.stopReason,
+    };
   }
-  if (!report.valid) {
-    result.stopReason = "preflight_failed";
-    return result;
-  }
+  const prompt = createPromptSession();
+  try {
+    const loop = new AgentLoop(repo);
+    const events: RunEvent[] = [];
+    const result = await loop.run({
+      dryRun: options.dryRun,
+      nonInteractive: options.nonInteractive,
+      signal: options.signal ?? (isInterrupted() ? AbortSignal.abort() : undefined),
+      chooseClassification: async (item, classification) => chooseClassification(prompt, item, classification),
+      confirmDefinition: async (item) => (await prompt.ask(`Definición ${item.definitionRef}: [c]onfirmar [s]altar [q]salir `, true)) === "c",
+      onEvent: (event) => { events.push(event); },
+    });
+    return {
+      root: result.root,
+      actions: result.actions.map((action) => ({ kind: "inbox" as const, id: action.id, action: action.action, definitionRef: action.nextAction })),
+      features: result.features,
+      stopReason: result.stopReason,
+      nextAction: result.nextAction,
+      events,
+    };
+  } finally { prompt.close(); }
+}
 
-  const triageResult = await triage(repo, {
-    nonInteractive: options.nonInteractive,
-    edit: options.edit,
-    dryRun: options.dryRun
+async function chooseClassification(prompt: ReturnType<typeof createPromptSession>, item: InboxItem, classification: Classification): Promise<"direct" | "spec" | "adr" | "split" | "defer" | "reject" | "quit"> {
+  const risks = classification.risks.length ? classification.risks.join(", ") : "sin riesgos";
+  const answer = await prompt.ask(`Inbox ${item.id}: ${classification.route}/${classification.size}, ${risks}. ${classification.rationale.join(" ")} [d]irect [s]pec [a]dr [p]artir [f]iferir [r]echazar [q]salir `, true);
+  return answer === "d" ? "direct" : answer === "s" ? "spec" : answer === "a" ? "adr" : answer === "p" ? "split" : answer === "f" ? "defer" : answer === "r" ? "reject" : "quit";
+}
+
+async function watchLoop(repo: FilesystemForgiumRepository, options: RunOptions, interrupted: () => boolean): Promise<void> {
+  let fingerprint = await durableFingerprint(repo.root);
+  const run = async () => {
+    const events = [] as unknown[];
+    const loop = new AgentLoop(repo);
+    const prompt = createPromptSession();
+    try {
+      const result = await loop.run({
+        dryRun: options.dryRun,
+        nonInteractive: options.nonInteractive,
+        chooseClassification: async (item, classification) => chooseClassification(prompt, item, classification),
+        confirmDefinition: async (item) => (await prompt.ask(`Definición ${item.definitionRef}: [c]onfirmar [s]altar [q]salir `, true)) === "c",
+        signal: options.signal,
+        onEvent: async (event) => { events.push(event); if (program.opts<GlobalOptions>().json) console.log(JSON.stringify(event)); else console.log(`[${event.type}] ${event.message}${event.nextAction ? ` Next: ${event.nextAction}` : ""}`); },
+      });
+      if (program.opts<GlobalOptions>().json) console.log(JSON.stringify({ type: "stop", at: new Date().toISOString(), message: `Loop stopped: ${result.stopReason}.`, stopReason: result.stopReason, nextAction: result.nextAction }));
+      else console.log(renderRun({ root: result.root, actions: result.actions.map((a) => ({ kind: "inbox", id: a.id, action: a.action })), features: result.features, stopReason: result.stopReason, nextAction: result.nextAction }));
+    } finally { prompt.close(); }
+  };
+  await run();
+  fingerprint = await durableFingerprint(repo.root);
+  while (!interrupted()) {
+    await new Promise<void>((resolve) => {
+      let timer: NodeJS.Timeout | undefined;
+      let settled = false;
+      let poll: NodeJS.Timeout;
+      let stop: NodeJS.Timeout;
+      const finishIfChanged = async () => {
+        if (settled) return;
+        const next = await durableFingerprint(repo.root);
+        if (next === fingerprint) return;
+        settled = true;
+        clearInterval(poll); clearInterval(stop); watcher.close(); resolve();
+      };
+      const watcher = fs.watch(repo.root, { recursive: true }, () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { void finishIfChanged(); }, 150);
+      });
+      poll = setInterval(() => { void finishIfChanged(); }, 500);
+      stop = setInterval(() => { if (interrupted() && !settled) { settled = true; clearInterval(poll); clearInterval(stop); watcher.close(); resolve(); } }, 250);
+    });
+    if (interrupted()) break;
+    const next = await durableFingerprint(repo.root);
+    if (next === fingerprint) continue;
+    await run();
+    fingerprint = await durableFingerprint(repo.root);
+  }
+}
+
+async function durableFingerprint(root: string): Promise<string> {
+  const parts: string[] = [];
+  const walk = (directory: string) => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".forgium") continue;
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else { try { const stat = fs.statSync(full); parts.push(`${path.relative(root, full)}:${stat.size}:${stat.mtimeMs}`); } catch { /* raced with writer */ } }
+    }
+  };
+  walk(root);
+  return parts.join("|");
+}
+
+function createPromptSession(): { ask: (question: string, normalize?: boolean) => Promise<string>; close: () => void } {
+  const output = program.opts<GlobalOptions>().json ? process.stderr : process.stdout;
+  const readline = createInterface({ input: process.stdin, output });
+  const lines: string[] = [];
+  const waiters: Array<(line: string) => void> = [];
+  let closed = false;
+  readline.on("line", (line: string) => {
+    const waiter = waiters.shift();
+    if (waiter) waiter(line);
+    else lines.push(line);
   });
-  result.actions.push(...triageResult.actions);
-  if (isInterrupted()) {
-    result.stopReason = "interrupted";
-    return result;
-  }
-  const ready = await repo.listFeatures("ready");
-  if (options.dryRun) {
-    result.features.push(...ready.slice(0, maxFeatures).map((feature) => ({ id: feature.id, state: feature.state, action: "planned" })));
-    result.stopReason = "dry_run";
-    return result;
-  }
-  if (!ready.length) {
-    result.stopReason = triageResult.stopReason === "human_input_required" ? "human_input_required" : triageResult.stopReason === "user_quit" ? "user_quit" : "no_actionable_work";
-    return result;
-  }
-
-  const registry = options.engine === "pi"
-    ? new ExecutionAdapterRegistry([new PiRpcExecutionAdapter()])
-    : options.engine === "pi-spec-flow"
-      ? new ExecutionAdapterRegistry([new SpecFlowExecutionAdapter()])
-      : new ExecutionAdapterRegistry();
-  const candidates = ready.slice(0, maxFeatures);
-  for (const feature of candidates) {
-    const execution = await repo.executeFeature(feature.id, registry);
-    result.features.push({ id: feature.id, state: execution.feature.state, action: execution.outcome });
-    if (execution.outcome === "needs_human") result.stopReason = options.engine === "pi-spec-flow" ? "human_input_required" : "engine_unavailable";
-    else if (execution.outcome === "completed") result.stopReason = "review_required";
-    else if (execution.outcome === "blocked") result.stopReason = "feature_blocked";
-    else if (execution.outcome === "verification_failed") result.stopReason = "verification_failed";
-    else result.stopReason = "interrupted";
-    break;
-  }
-  return result;
-}
-
-function parseRunBudget(options: RunOptions): number {
-  if (options.untilEmpty && options.maxFeatures !== undefined) throw new RunOptionsInvalidError("--until-empty cannot be combined with --max-features.");
-  if (options.maxFeatures === undefined) return options.untilEmpty ? Number.MAX_SAFE_INTEGER : 1;
-  if (!/^[1-9]\d*$/.test(options.maxFeatures)) throw new RunOptionsInvalidError("--max-features must be a positive integer.");
-  const value = Number(options.maxFeatures);
-  if (!Number.isSafeInteger(value) || value < 1) throw new RunOptionsInvalidError("--max-features must be a positive integer.");
-  return value;
-}
-
-async function ask(question: string): Promise<string> {
-  const readline = createInterface({ input: process.stdin, output: process.stdout });
-  try { return (await readline.question(question)).trim().toLowerCase(); }
-  finally { readline.close(); }
-}
-
-async function openEditor(draft: Draft): Promise<void> {
-  const configured = process.env.VISUAL ?? process.env.EDITOR;
-  if (!configured) throw new EditorUnavailableError();
-  const command = splitCommand(configured);
-  if (!command[0]) throw new EditorUnavailableError();
-  await runProcess(command[0], [...command.slice(1), path.join(draft.path, "draft.md")]);
-}
-
-function splitCommand(value: string): string[] {
-  return value.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((part) => part.replace(/^"|"$/g, "")) ?? [];
-}
-
-function runProcess(command: string, args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "inherit" });
-    child.once("error", reject);
-    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`Editor exited with code ${code}`)));
+  readline.on("close", () => {
+    closed = true;
+    while (waiters.length) waiters.shift()!("");
   });
+  return {
+    ask: async (question, normalize = false) => {
+      output.write(question);
+      const line = lines.shift() ?? (closed ? "" : await new Promise<string>((resolve) => waiters.push(resolve)));
+      const answer = line.trim();
+      return normalize ? answer.toLowerCase() : answer;
+    },
+    close: () => readline.close(),
+  };
+}
+
+async function defineWork(prompt: (question: string, normalize?: boolean) => Promise<string>): Promise<{ goal: string; acceptance: string[]; verification: { commands: Array<{ name: string; run: string }>; requiredEvidence?: Array<{ criterion: string; kind: string }> } } | null> {
+  const goal = await prompt("Objetivo de implementación: ");
+  if (!goal) return null;
+  const acceptance: string[] = [];
+  while (true) {
+    const criterion = await prompt("Criterio de aceptación (vacío para terminar): ");
+    if (!criterion) break;
+    acceptance.push(criterion);
+  }
+  if (!acceptance.length) return null;
+  const commands: Array<{ name: string; run: string }> = [];
+  while (true) {
+    const command = await prompt("Comando de verificación (vacío para terminar): ");
+    if (!command) break;
+    commands.push({ name: `command-${commands.length + 1}`, run: command });
+  }
+  const manualEvidence: string[] = [];
+  while (true) {
+    const evidence = await prompt("Evidencia manual (criterio:tipo, vacío para terminar): ");
+    if (!evidence) break;
+    manualEvidence.push(evidence);
+  }
+  try {
+    return { goal, acceptance, verification: buildVerification(commands.map((command) => command.run), manualEvidence) };
+  } catch {
+    return null;
+  }
+}
+
+function collectOption(value: string, previous: string[]): string[] { return [...previous, value]; }
+
+function buildVerification(commands: string[], manualEvidence: string[]) {
+  const requiredEvidence = manualEvidence.map((value) => {
+    const delimiter = value.lastIndexOf(":");
+    if (delimiter <= 0 || delimiter === value.length - 1) throw new ForgiumError("Manual evidence must use criterion:kind.", "VERIFICATION_INVALID", 2);
+    return { criterion: value.slice(0, delimiter).trim(), kind: value.slice(delimiter + 1).trim() };
+  });
+  if (!commands.length && !requiredEvidence.length) throw new ForgiumError("Work requires a verification command or manual evidence.", "VERIFICATION_REQUIRED", 2);
+  return {
+    commands: commands.map((run, index) => ({ name: `command-${index + 1}`, run })),
+    requiredEvidence: requiredEvidence.length ? requiredEvidence : undefined,
+  };
 }
 
 function renderTriage(result: TriageResult): string {
-  return `Forgium triage\n  Actions: ${result.actions.length}\n  Stop: ${result.stopReason}`;
+  return `Forgium triage\n  Actions: ${result.actions.length}${renderSpecActions(result.actions)}\n  Stop: ${result.stopReason}`;
 }
 function renderRun(result: RunResult): string {
-  return `Forgium run\n  Actions: ${result.actions.length}\n  Features: ${result.features.length}\n  Stop: ${result.stopReason}`;
+  const events = result.events?.length ? `\n\nEvents\n${result.events.map((event) => `  [${event.type}] ${event.message}${event.nextAction ? ` — Next: ${event.nextAction}` : ""}`).join("\n")}` : "";
+  return `Forgium run\n  Actions: ${result.actions.length}\n  Features: ${result.features.length}${renderSpecActions(result.actions)}\n  Stop: ${result.stopReason}${result.nextAction ? `\n  Next: ${result.nextAction}` : ""}${events}`;
 }
-function renderProfileHint(profile: Awaited<ReturnType<FilesystemForgiumRepository["inspectExecutionMode"]>>): string {
-  if (profile.kind === "direct") return "\nDirect execution should be handled by the Forgium/Pi runtime.";
-  if (profile.kind === "spec-needs-plan") return `\nPlan tickets with: ${profile.commands.init}\nThen implement with: ${profile.commands.implement}`;
-  return `\nContinue spec-flow with: ${profile.commands.implement}\nNext ticket: ${profile.commands.next}`;
+function renderSpecActions(actions: TriageAction[]): string {
+  const definitions = actions.filter((action) => action.definitionRef).map((action) => `${action.definitionKind}: ${action.definitionRef}`);
+  return definitions.length ? `\n  Definition required: ${definitions.join(", ")}` : "";
 }
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];

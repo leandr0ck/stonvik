@@ -56,7 +56,7 @@ describe("verification receipts and review", () => {
 
   it("moves review back to doing when changes are requested", async () => {
     const { repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "Review me", goal: "Review the change.", acceptance: ["A reviewer decides"] });
+    const feature = await repo.createFeature({ title: "Review me", goal: "Review the change.", acceptance: ["A reviewer decides"], verification: { commands: [{ name: "pass", run: "true" }] } });
     await repo.startFeature(feature.id);
     await repo.submitForReview(feature.id);
 
@@ -70,7 +70,7 @@ describe("verification receipts and review", () => {
 
   it("reports receipts with broken local references during validation", async () => {
     const { repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "Broken evidence", goal: "Validate receipts.", acceptance: ["Invalid references are visible"] });
+    const feature = await repo.createFeature({ title: "Broken evidence", goal: "Validate receipts.", acceptance: ["Invalid references are visible"], verification: { commands: [{ name: "pass", run: "true" }] } });
     const receiptsPath = path.join(feature.path, "receipts");
     await fs.mkdir(receiptsPath);
     await fs.writeFile(path.join(receiptsPath, "receipt-bad.yaml"), YAML.stringify({

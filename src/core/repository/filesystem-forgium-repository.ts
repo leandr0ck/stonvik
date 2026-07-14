@@ -5,13 +5,16 @@ import os from "node:os";
 import { exec as execCallback } from "node:child_process";
 import { promisify } from "node:util";
 import YAML from "yaml";
-import type { CaptureInput, CreateFeatureInput, Draft, DraftFrontmatter, ExecutionProfile, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, ValidationReport, VerificationReceipt } from "../domain/types.js";
+import type { CaptureInput, Classification, CreateFeatureInput, ExecutionProfile, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, RunEvent, ValidationReport, VerificationReceipt } from "../domain/types.js";
 import { FEATURE_STATES } from "../domain/types.js";
-import { DraftAlreadyExistsError, DraftNotFoundError, FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, ForgiumNotInitializedError, InvalidDraftError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError } from "../errors/forgium-errors.js";
-import { DraftSchema } from "../schemas/draft.schema.js";
+import { FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, ForgiumNotInitializedError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, LoopAlreadyRunningError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError } from "../errors/forgium-errors.js";
 import { InboxFrontmatterSchema } from "../schemas/inbox.schema.js";
 import { ManifestSchema } from "../schemas/manifest.schema.js";
 import { ReceiptSchema } from "../schemas/receipt.schema.js";
+import { ClassificationSchema } from "../schemas/classification.schema.js";
+import { DefinitionDocumentSchema, DefinitionMetadataSchema } from "../schemas/definition.schema.js";
+import { ClassificationReceiptSchema } from "../schemas/classification-receipt.schema.js";
+import { RunEventSchema } from "../schemas/run-event.schema.js";
 import { isoNow, shortId, slugify, timestampForFile } from "../services/id.js";
 import { specFlowCommandsForSpec } from "../services/spec-flow-commands.js";
 import { canTransition } from "../transitions/transition-rules.js";
@@ -30,6 +33,40 @@ export class FilesystemForgiumRepository {
   async init(): Promise<void> {
     for (const dir of this.paths.requiredDirs) await fs.mkdir(dir, { recursive: true });
     await this.ensureGitignoreRuntime();
+  }
+
+  async acquireLoopLease(runId: string): Promise<() => Promise<void>> {
+    await this.assertInitialized();
+    await fs.mkdir(this.paths.runtime, { recursive: true });
+    const lockPath = path.join(this.paths.runtime, "run-loop.lock");
+    try {
+      const handle = await fs.open(lockPath, "wx");
+      await handle.writeFile(JSON.stringify({ runId, pid: process.pid, host: os.hostname(), acquiredAt: isoNow() }, null, 2));
+      await handle.close();
+      return async () => { await fs.rm(lockPath, { force: true }); };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        let stale = false;
+        try {
+          const current = JSON.parse(await fs.readFile(lockPath, "utf8")) as { pid?: number; acquiredAt?: string };
+          const age = current.acquiredAt ? Date.now() - Date.parse(current.acquiredAt) : Number.POSITIVE_INFINITY;
+          let alive = false;
+          if (typeof current.pid === "number") { try { process.kill(current.pid, 0); alive = true; } catch { alive = false; } }
+          stale = !alive || age > 24 * 60 * 60 * 1000;
+        } catch { stale = true; }
+        if (stale) { await fs.rm(lockPath, { force: true }); return this.acquireLoopLease(runId); }
+        throw new LoopAlreadyRunningError();
+      }
+      throw error;
+    }
+  }
+
+  async persistEvent(event: RunEvent): Promise<void> {
+    RunEventSchema.parse(event);
+    await fs.mkdir(this.paths.events, { recursive: true });
+    const eventPath = path.join(this.paths.events, `${event.at.slice(0, 10)}.ndjson`);
+    const current = await fs.readFile(eventPath, "utf8").catch(() => "");
+    await this.writeFileAtomic(eventPath, `${current}${JSON.stringify(event)}\n`);
   }
 
   async capture(input: CaptureInput): Promise<InboxItem> {
@@ -62,61 +99,62 @@ export class FilesystemForgiumRepository {
     return items.sort((a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
   }
 
-  async listDrafts(): Promise<Draft[]> {
-    await this.assertInitialized();
-    const drafts: Draft[] = [];
-    for (const entry of (await safeReaddir(this.paths.featureStateDir("draft"))).sort()) {
-      const full = this.paths.featureDir("draft", entry);
-      if ((await fs.stat(full)).isDirectory()) drafts.push(await this.readDraft(full));
-    }
-    return drafts.sort((a, b) => a.frontmatter.created.localeCompare(b.frontmatter.created) || a.id.localeCompare(b.id));
-  }
-
-  async getDraft(id: string): Promise<Draft | null> {
-    for (const draft of await this.listDrafts()) if (draft.id === id || draft.slug === id) return draft;
-    return null;
-  }
-
-  async createDraftFromInbox(id: string): Promise<Draft> {
-    await this.assertInitialized();
-    const item = (await this.listInbox()).find((candidate) => candidate.id === id);
-    if (!item) throw new InvalidInboxItemError(`Inbox item not found: ${id}`);
-    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
-
-    const slug = slugify(item.title);
-    const draftId = `draft-${slug}`;
-    const draftPath = this.paths.featureDir("draft", slug);
-    if (await exists(draftPath)) throw new DraftAlreadyExistsError(draftId);
-
-    const frontmatter: DraftFrontmatter = {
-      schemaVersion: 1,
-      id: draftId,
-      created: isoNow(),
-      source: { type: "inbox", ref: item.id },
-      title: item.title,
-      goal: "",
-      acceptance: [],
-      constraints: []
-    };
-    DraftSchema.parse(frontmatter);
-    const draftContent = this.renderDraft(frontmatter, item.body ? `${item.title}\n\n${item.body}` : item.title);
-    await fs.mkdir(draftPath, { recursive: false });
-    try {
-      await this.writeFileAtomic(path.join(draftPath, "draft.md"), draftContent);
-      await this.writeInboxItem({ ...item, status: "drafted", draftRef: draftId });
-    } catch (error) {
-      await fs.rm(draftPath, { recursive: true, force: true });
-      throw error;
-    }
-    return this.readDraft(draftPath);
-  }
-
   async deferInbox(id: string): Promise<InboxItem> {
     const item = await this.requireInbox(id);
     if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
     const deferred = { ...item, status: "deferred" as const };
     await this.writeInboxItem(deferred);
     return deferred;
+  }
+
+  async rejectInbox(id: string): Promise<InboxItem> {
+    const item = await this.requireInbox(id);
+    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
+    const rejected = { ...item, status: "rejected" as const };
+    await this.writeInboxItem(rejected);
+    return rejected;
+  }
+
+  async requireDefinitionForInbox(id: string, kind: "spec" | "adr", legacyReference = false): Promise<InboxItem> {
+    const item = await this.requireInbox(id);
+    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
+    const slug = `${slugify(item.title)}-${item.id.slice(-5)}`;
+    const definitionDir = this.paths.definitionDir(slug);
+    const definitionPath = path.join(definitionDir, kind === "spec" ? "spec.md" : "adr.md");
+    if (await exists(definitionDir)) throw new InvalidInboxItemError(`Definition already exists: ${path.relative(this.root, definitionDir)}`);
+    await fs.mkdir(definitionDir, { recursive: false });
+    try {
+      await this.writeFileAtomic(path.join(definitionDir, "definition.yaml"), YAML.stringify({ schemaVersion: 1, inboxRef: item.id, kind, created: isoNow(), document: path.basename(definitionPath) }));
+      await this.writeFileAtomic(definitionPath, this.renderDefinitionTemplate(item, kind));
+    } catch (error) {
+      await fs.rm(definitionDir, { recursive: true, force: true });
+      throw error;
+    }
+    let referencePath = definitionPath;
+    if (legacyReference) {
+      referencePath = path.join(kind === "spec" ? this.paths.specs : this.paths.adrs, `${slug}.md`);
+      await this.writeFileAtomic(referencePath, await fs.readFile(definitionPath, "utf8"));
+    }
+    const needsDefinition = { ...item, status: "needs_definition" as const, definitionRef: path.relative(this.root, referencePath), definitionKind: kind };
+    await this.writeInboxItem(needsDefinition);
+    return needsDefinition;
+  }
+
+  async confirmDefinitionForInbox(id: string): Promise<Feature> {
+    const item = await this.requireInbox(id);
+    if (item.status !== "needs_definition" || !item.definitionRef || !item.definitionKind) throw new InvalidInboxItemError(`Inbox item does not require a definition: ${id}`);
+    const referencedPath = path.resolve(this.root, item.definitionRef);
+    const internalDir = this.paths.definitionDir(`${slugify(item.title)}-${item.id.slice(-5)}`);
+    const allowedReference = isWithin(this.paths.definitions, referencedPath)
+      || isWithin(item.definitionKind === "spec" ? this.paths.specs : this.paths.adrs, referencedPath);
+    const documentPath = referencedPath;
+    if (!allowedReference) throw new InvalidInboxItemError(`Definition path is outside the definition tree: ${item.definitionRef}`);
+    if (!(await exists(documentPath)) || !(await exists(internalDir))) throw new InvalidInboxItemError(`Definition is missing: ${item.definitionRef}`);
+    const metadataPath = path.join(internalDir, "definition.yaml");
+    const metadata = DefinitionMetadataSchema.safeParse(YAML.parse(await fs.readFile(metadataPath, "utf8")));
+    if (!metadata.success || metadata.data.inboxRef !== item.id || metadata.data.kind !== item.definitionKind || (metadata.data.document !== path.basename(documentPath) && metadata.data.document !== (item.definitionKind === "spec" ? "spec.md" : "adr.md"))) throw new InvalidInboxItemError(`Definition metadata is invalid: ${item.definitionRef}`);
+    const definition = await this.readDefinitionWorkDefinition(documentPath, item);
+    return this.createFeatureFromInbox(item.id, definition);
   }
 
   async mergeInbox(id: string, featureId: string): Promise<InboxItem> {
@@ -128,56 +166,12 @@ export class FilesystemForgiumRepository {
     return merged;
   }
 
-  async promoteDraft(id: string): Promise<Feature> {
-    await this.assertInitialized();
-    const draft = await this.requireDraft(id);
-    const frontmatter = this.parsePromotableDraft(draft);
-    const featureId = `feature-${draft.slug}`;
-    const sourceInbox = (await this.listInbox()).find((item) => item.id === frontmatter.source.ref);
-    if (!sourceInbox || sourceInbox.status !== "drafted" || sourceInbox.draftRef !== draft.id) {
-      throw new InvalidDraftError(`Draft source is not linked to a drafted Inbox item: ${draft.id}`);
-    }
-    if (await this.featureIdExists(featureId) || await exists(this.paths.featureDir("ready", draft.slug))) {
-      throw new FeatureAlreadyExistsError(featureId);
-    }
-
-    const manifest: FeatureManifest = {
-      schemaVersion: 1,
-      id: featureId,
-      title: frontmatter.title.trim(),
-      created: frontmatter.created,
-      source: frontmatter.source,
-      goal: frontmatter.goal.trim(),
-      acceptance: frontmatter.acceptance.map((criterion) => criterion.trim()).filter(Boolean),
-      constraints: frontmatter.constraints?.map((constraint) => constraint.trim()).filter(Boolean)
-    };
-    ManifestSchema.parse(manifest);
-    const destination = this.paths.featureDir("ready", draft.slug);
-    const manifestPath = path.join(draft.path, "manifest.yaml");
-    try {
-      await this.writeFileAtomic(manifestPath, YAML.stringify(manifest));
-      await fs.rename(draft.path, destination);
-    } catch (error) {
-      await fs.rm(manifestPath, { force: true });
-      throw error;
-    }
-
-    try {
-      await this.writeInboxItem({ ...sourceInbox, status: "promoted", featureRef: featureId });
-    } catch (error) {
-      await fs.rename(destination, draft.path).catch(() => undefined);
-      await fs.rm(manifestPath, { force: true });
-      throw error;
-    }
-    return this.readFeature(destination, "ready");
-  }
-
   async createFeature(input: CreateFeatureInput): Promise<Feature> {
     await this.assertInitialized();
     const slug = input.slug ? slugify(input.slug) : slugify(input.title);
     const id = input.id ?? `feature-${slug}`;
     const featurePath = this.paths.featureDir("ready", slug);
-    if (await exists(featurePath)) throw new FeatureAlreadyExistsError(id);
+    if (await this.featureIdExists(id) || await exists(featurePath)) throw new FeatureAlreadyExistsError(id);
     const manifest: FeatureManifest = {
       schemaVersion: 1,
       id,
@@ -187,13 +181,43 @@ export class FilesystemForgiumRepository {
       goal: input.goal,
       acceptance: input.acceptance,
       constraints: input.constraints,
-      verification: input.verification
+      verification: input.verification,
+      classification: input.classification,
     };
     const parsed = ManifestSchema.safeParse(manifest);
     if (!parsed.success) throw new InvalidManifestError(parsed.error.message);
-    await fs.mkdir(featurePath, { recursive: false });
-    await this.writeFileAtomic(path.join(featurePath, "manifest.yaml"), YAML.stringify(manifest));
+    const staging = path.join(this.paths.featureStateDir("ready"), `.creating-${slug}-${process.pid}-${shortId()}`);
+    await fs.mkdir(staging, { recursive: false });
+    try {
+      await this.writeFileAtomic(path.join(staging, "manifest.yaml"), YAML.stringify(manifest));
+      await fs.rename(staging, featurePath);
+    } catch (error) {
+      await fs.rm(staging, { recursive: true, force: true });
+      throw error;
+    }
     return this.readFeature(featurePath, "ready");
+  }
+
+  async recordClassification(item: InboxItem, classification: Classification, runId: string): Promise<void> {
+    const parsed = ClassificationSchema.safeParse(classification);
+    if (!parsed.success) throw new InvalidInboxItemError(`Invalid classification: ${parsed.error.message}`);
+    await fs.mkdir(this.paths.inboxReceipts, { recursive: true });
+    const receipt = { schemaVersion: 1 as const, kind: "classification" as const, inboxId: item.id, runId, created: isoNow(), outcome: "classified" as const, classification: parsed.data };
+    ClassificationReceiptSchema.parse(receipt);
+    await this.writeFileAtomic(path.join(this.paths.inboxReceipts, `${item.id}-${runId}.yaml`), YAML.stringify(receipt));
+  }
+
+  async createFeatureFromInbox(inboxId: string, input: Omit<CreateFeatureInput, "source">): Promise<Feature> {
+    const item = await this.requireInbox(inboxId);
+    if (item.status !== "captured" && item.status !== "needs_definition") throw new InvalidInboxItemError(`Inbox item cannot create Work: ${inboxId}`);
+    const feature = await this.createFeature({ ...input, source: { type: "inbox", ref: item.id } });
+    try {
+      await this.writeInboxItem({ ...item, status: "promoted", featureRef: feature.id });
+    } catch (error) {
+      await fs.rm(feature.path, { recursive: true, force: true });
+      throw error;
+    }
+    return feature;
   }
 
   async listReceipts(featureId: string): Promise<Receipt[]> {
@@ -241,7 +265,7 @@ export class FilesystemForgiumRepository {
 
     const receipt = this.createVerificationReceipt(feature, runId, outcome, checks, evidence);
     await this.persistReceipt(feature, receipt);
-    if (outcome === "failed" || outcome === "cancelled") {
+    if (outcome === "failed" || outcome === "cancelled" || outcome === "manual_required") {
       await this.persistReceipt(feature, this.createHandoffReceipt(feature, runId, outcome === "cancelled" ? "cancelled" : "failed", receipt.id, receipt.summary));
     } else {
       await this.transition(id, "review");
@@ -249,41 +273,53 @@ export class FilesystemForgiumRepository {
     return receipt;
   }
 
-  async reviewFeature(id: string, decision: ReviewDecision, summary: string, actorName = "forgium"): Promise<Feature> {
+  async reviewFeature(id: string, decision: ReviewDecision, summary: string, actorName = "forgium", findings?: string[]): Promise<Feature> {
     const feature = await this.requireFeature(id);
     if (feature.state !== "review") throw new InvalidStateTransitionError(feature.state, "review");
-    await this.persistReceipt(feature, this.createReviewReceipt(feature, decision, summary, actorName));
+    await this.persistReceipt(feature, this.createReviewReceipt(feature, decision, summary, actorName, findings));
+    if (decision === "needs_human") return feature;
     return this.transition(id, decision === "approved" ? "done" : decision === "changes_requested" ? "doing" : "blocked");
   }
 
-  async executeFeature(id: string, registry: ExecutionAdapterRegistry): Promise<{ outcome: ExecutionOutcome | "needs_human"; feature: Feature; summary: string; adapterId?: string }> {
-    const ready = await this.requireFeature(id);
-    if (ready.state !== "ready") throw new InvalidStateTransitionError(ready.state, "doing");
+  async executeFeature(id: string, registry: ExecutionAdapterRegistry, signal?: AbortSignal): Promise<{ outcome: ExecutionOutcome | "needs_human"; feature: Feature; summary: string; adapterId?: string; details?: Record<string, unknown> }> {
+    const current = await this.requireFeature(id);
+    if (current.state !== "ready" && current.state !== "doing") throw new InvalidStateTransitionError(current.state, "doing");
     const profile = await this.inspectExecutionMode(id);
     const runId = `run-${timestampForFile()}-${shortId()}`;
-    const request = { root: this.root, feature: ready, profile, runId, permissions: "repository" as const };
+    const request = { root: this.root, feature: current, profile, runId, permissions: "repository" as const, allowedPaths: ["source files and tests; never product/, features/, or .forgium/"], signal };
     const adapter = await registry.resolve(request);
-    if (!adapter) return { outcome: "needs_human", feature: ready, summary: "No execution adapter is available for this Feature." };
+    if (!adapter) return { outcome: "needs_human", feature: current, summary: "No execution adapter is available for this Feature." };
 
-    const doing = await this.startFeature(id);
+    const doing = current.state === "ready" ? await this.startFeature(id) : current;
     const activeProfile = await this.inspectExecutionMode(id);
-    const result = await adapter.execute({ ...request, feature: doing, profile: activeProfile });
+    const fingerprint = await this.durableFeatureFingerprint(id);
+    let result: ExecutionResult;
+    try {
+      result = await adapter.execute({ ...request, feature: doing, profile: activeProfile });
+    } catch (error) {
+      result = { outcome: "needs_human", summary: "Execution adapter failed before returning a structured result.", reason: String((error as Error).message) };
+    }
+    result.details = { ...(result.details ?? {}), featureFingerprint: fingerprint };
     await this.persistReceipt(doing, this.createExecutionReceipt(doing, runId, adapter.id, result));
     if (result.outcome === "completed") {
       const verification = await this.verifyFeature(id, { runId });
-      return { outcome: verification.outcome === "failed" ? "verification_failed" : result.outcome, feature: (await this.requireFeature(id)), summary: result.summary, adapterId: adapter.id };
+      return { outcome: verification.outcome === "passed" ? result.outcome : verification.outcome === "manual_required" ? "needs_human" : "verification_failed", feature: (await this.requireFeature(id)), summary: result.summary, adapterId: adapter.id, details: result.details };
     }
-    if (result.outcome === "blocked" || result.outcome === "needs_human") {
+    if (result.outcome === "blocked") {
       const blocked = await this.transition(id, "blocked");
       await this.persistReceipt(blocked, this.createHandoffReceipt(blocked, runId, result.outcome, undefined, result.reason ?? result.summary));
-      return { outcome: result.outcome, feature: blocked, summary: result.summary, adapterId: adapter.id };
+      return { outcome: result.outcome, feature: blocked, summary: result.summary, adapterId: adapter.id, details: result.details };
+    }
+    if (result.outcome === "needs_human") {
+      await this.persistReceipt(doing, this.createHandoffReceipt(doing, runId, "needs_human", undefined, result.reason ?? result.summary));
+      return { outcome: result.outcome, feature: doing, summary: result.summary, adapterId: adapter.id, details: result.details };
     }
     if (result.outcome === "verification_failed") {
       await this.persistReceipt(doing, this.createHandoffReceipt(doing, runId, "failed", undefined, result.reason ?? result.summary));
     } else {
       await this.persistReceipt(doing, this.createHandoffReceipt(doing, runId, "cancelled", undefined, result.reason ?? result.summary));
     }
-    return { outcome: result.outcome, feature: await this.requireFeature(id), summary: result.summary, adapterId: adapter.id };
+    return { outcome: result.outcome, feature: await this.requireFeature(id), summary: result.summary, adapterId: adapter.id, details: result.details };
   }
 
   async listFeatures(state?: FeatureState): Promise<Feature[]> {
@@ -305,6 +341,25 @@ export class FilesystemForgiumRepository {
   }
 
   async getNextReady(): Promise<Feature | null> { return (await this.listFeatures("ready"))[0] ?? null; }
+
+  async getActiveFeatures(): Promise<Feature[]> { return (await this.listFeatures()).filter((feature) => feature.state === "doing" || feature.state === "review"); }
+
+  async durableFeatureFingerprint(id: string): Promise<string> {
+    const feature = await this.requireFeature(id);
+    const parts: string[] = [];
+    const walk = async (directory: string): Promise<void> => {
+      for (const entry of (await safeReaddir(directory)).sort()) {
+        if (entry === "receipts") continue;
+        const full = path.join(directory, entry);
+        const stat = await fs.stat(full).catch(() => undefined);
+        if (!stat) continue;
+        if (stat.isDirectory()) await walk(full);
+        else parts.push(`${path.relative(feature.path, full)}:${stat.size}:${stat.mtimeMs}`);
+      }
+    };
+    await walk(feature.path);
+    return parts.join("|");
+  }
 
   async startFeature(id: string): Promise<Feature> { return this.transition(id, "doing", true); }
   async submitForReview(id: string): Promise<Feature> { return this.transition(id, "review"); }
@@ -337,11 +392,11 @@ export class FilesystemForgiumRepository {
 
   async getStatus(): Promise<RepositoryStatus> {
     await this.assertInitialized();
-    const inbox: Record<string, number> = { captured: 0, drafted: 0, promoted: 0, merged: 0, deferred: 0 };
+    const inbox: Record<string, number> = { captured: 0, needs_definition: 0, promoted: 0, merged: 0, deferred: 0, rejected: 0 };
     for (const item of await this.listInbox()) inbox[item.status] = (inbox[item.status] ?? 0) + 1;
     const features = Object.fromEntries(FEATURE_STATES.map((s) => [s, 0])) as RepositoryStatus["features"];
     for (const feature of await this.listFeatures()) features[feature.state]++;
-    return { inbox, drafts: await this.countDirectories(this.paths.featureStateDir("draft")), features };
+    return { inbox, features };
   }
 
   async validate(): Promise<ValidationReport> {
@@ -351,6 +406,24 @@ export class FilesystemForgiumRepository {
     for (const file of (await safeReaddir(this.paths.inbox)).filter((e) => e.endsWith(".md"))) {
       try { await this.readInboxFile(path.join(this.paths.inbox, file)); } catch (error) { issues.push({ severity: "error", code: "INVALID_INBOX_ITEM", message: String((error as Error).message), path: path.join(this.paths.inbox, file) }); }
     }
+    for (const file of (await safeReaddir(this.paths.inboxReceipts)).filter((e) => e.endsWith(".yaml"))) {
+      try { ClassificationReceiptSchema.parse(YAML.parse(await fs.readFile(path.join(this.paths.inboxReceipts, file), "utf8"))); }
+      catch (error) { issues.push({ severity: "error", code: "INVALID_CLASSIFICATION_RECEIPT", message: String((error as Error).message), path: path.join(this.paths.inboxReceipts, file) }); }
+    }
+    for (const file of (await safeReaddir(this.paths.events)).filter((e) => e.endsWith(".ndjson"))) {
+      try {
+        const lines = (await fs.readFile(path.join(this.paths.events, file), "utf8")).split(/\r?\n/).filter(Boolean);
+        for (const line of lines) RunEventSchema.parse(JSON.parse(line));
+      } catch (error) { issues.push({ severity: "error", code: "INVALID_RUN_EVENT", message: String((error as Error).message), path: path.join(this.paths.events, file) }); }
+    }
+    for (const entry of await safeReaddir(this.paths.definitions)) {
+      const definitionDir = this.paths.definitionDir(entry);
+      try {
+        const metadata = DefinitionMetadataSchema.parse(YAML.parse(await fs.readFile(path.join(definitionDir, "definition.yaml"), "utf8")));
+        const documentPath = path.join(definitionDir, metadata.document);
+        if (!isWithin(definitionDir, documentPath) || !(await exists(documentPath))) throw new Error("Definition document is missing.");
+      } catch (error) { issues.push({ severity: "error", code: "INVALID_DEFINITION", message: String((error as Error).message), path: definitionDir }); }
+    }
     for (const state of FEATURE_STATES) {
       for (const entry of await safeReaddir(this.paths.featureStateDir(state))) {
         const full = this.paths.featureDir(state, entry);
@@ -358,11 +431,6 @@ export class FilesystemForgiumRepository {
         try { await this.readFeature(full, state); } catch (error) { issues.push({ severity: "error", code: "INVALID_FEATURE", message: String((error as Error).message), path: full }); }
         try { await this.validateReceiptFiles(full); } catch (error) { issues.push({ severity: "error", code: "INVALID_RECEIPT", message: String((error as Error).message), path: full }); }
       }
-    }
-    for (const entry of await safeReaddir(this.paths.featureStateDir("draft"))) {
-      const full = this.paths.featureDir("draft", entry);
-      if (!(await fs.stat(full)).isDirectory()) continue;
-      try { await this.readDraft(full); } catch (error) { issues.push({ severity: "error", code: "INVALID_DRAFT", message: String((error as Error).message), path: full }); }
     }
     return { valid: issues.filter((i) => i.severity === "error").length === 0, issues };
   }
@@ -387,13 +455,16 @@ export class FilesystemForgiumRepository {
 
   private async requireFeature(id: string): Promise<Feature> { const feature = await this.getFeature(id); if (!feature) throw new FeatureNotFoundError(id); return feature; }
 
+  private async featureIdExists(id: string): Promise<boolean> {
+    for (const feature of await this.listFeatures()) if (feature.id === id) return true;
+    return false;
+  }
+
   private async requireInbox(id: string): Promise<InboxItem> {
     const item = (await this.listInbox()).find((candidate) => candidate.id === id);
     if (!item) throw new InvalidInboxItemError(`Inbox item not found: ${id}`);
     return item;
   }
-
-  private async requireDraft(id: string): Promise<Draft> { const draft = await this.getDraft(id); if (!draft) throw new DraftNotFoundError(id); return draft; }
 
   private async assertInitialized(): Promise<void> {
     for (const dir of this.paths.requiredDirs) if (!(await exists(dir))) throw new ForgiumNotInitializedError();
@@ -409,12 +480,13 @@ export class FilesystemForgiumRepository {
     };
   }
 
-  private createReviewReceipt(feature: Feature, decision: ReviewDecision, summary: string, actorName: string): Receipt {
+  private createReviewReceipt(feature: Feature, decision: ReviewDecision, summary: string, actorName: string, findings?: string[]): Receipt {
     return {
       ...this.receiptBase(feature, "review", decision, summary, `review-${timestampForFile()}-${shortId()}`, "reviewer", actorName),
       kind: "review",
       outcome: decision,
-      decision
+      decision,
+      findings: findings?.length ? findings : undefined,
     };
   }
 
@@ -424,7 +496,8 @@ export class FilesystemForgiumRepository {
       kind: "execution",
       outcome: result.outcome,
       engine,
-      artifacts: result.artifacts
+      artifacts: result.artifacts,
+      details: result.details,
     };
   }
 
@@ -510,17 +583,6 @@ export class FilesystemForgiumRepository {
     };
   }
 
-  private async readDraft(draftPath: string): Promise<Draft> {
-    const draftFile = path.join(draftPath, "draft.md");
-    const raw = await fs.readFile(draftFile, "utf8");
-    const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-    if (!match) throw new InvalidDraftError(`Missing frontmatter in ${draftFile}`);
-    let frontmatter: DraftFrontmatter;
-    try { frontmatter = DraftSchema.parse(YAML.parse(match[1]!)) as DraftFrontmatter; }
-    catch (error) { throw new InvalidDraftError(`Invalid Draft frontmatter in ${draftFile}: ${String((error as Error).message)}`); }
-    return { id: frontmatter.id, slug: path.basename(draftPath), path: draftPath, frontmatter, body: match[2]!.trim() };
-  }
-
   private async readInboxFile(filePath: string): Promise<InboxItem> {
     const raw = await fs.readFile(filePath, "utf8");
     const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
@@ -537,38 +599,58 @@ export class FilesystemForgiumRepository {
     await this.writeFileAtomic(item.path, this.renderInbox(item));
   }
 
-  private renderDraft(frontmatter: DraftFrontmatter, originalText: string): string {
-    return `---\n${YAML.stringify(frontmatter)}---\n\n# Contexto original\n\n${originalText.trim()}\n\n## Notas de definición\n\n<!-- Decisiones, enlaces de investigación y detalles no contractuales. -->\n`;
-  }
-
-  private parsePromotableDraft(draft: Draft): DraftFrontmatter {
-    const parsed = DraftSchema.safeParse(draft.frontmatter);
-    if (!parsed.success) throw new InvalidDraftError(`Invalid Draft ${draft.id}: ${parsed.error.message}`);
-    const frontmatter = parsed.data as DraftFrontmatter;
-    if (!frontmatter.title.trim() || !frontmatter.goal.trim() || !frontmatter.acceptance.some((criterion) => criterion.trim())) {
-      throw new InvalidDraftError(`Draft is incomplete and cannot be promoted: ${draft.id}`);
-    }
-    return frontmatter;
-  }
-
-  private async featureIdExists(id: string): Promise<boolean> {
-    for (const feature of await this.listFeatures()) if (feature.id === id) return true;
-    return false;
-  }
-
-  private async countDirectories(directory: string): Promise<number> {
-    let count = 0;
-    for (const entry of await safeReaddir(directory)) {
-      if ((await fs.stat(path.join(directory, entry))).isDirectory()) count++;
-    }
-    return count;
-  }
-
   private renderInbox(item: InboxItem): string {
     const fm: Record<string, unknown> = { id: item.id, source: item.source, created: item.created, status: item.status };
-    if (item.draftRef) fm.draftRef = item.draftRef;
+    if (item.definitionRef) fm.definitionRef = item.definitionRef;
+    if (item.definitionKind) fm.definitionKind = item.definitionKind;
     if (item.featureRef) fm.featureRef = item.featureRef;
     return `---\n${YAML.stringify(fm)}---\n\n# ${item.title}\n${item.body ? `\n${item.body}\n` : ""}`;
+  }
+
+  private renderDefinitionTemplate(item: InboxItem, kind: "spec" | "adr"): string {
+    return `---\n${YAML.stringify({
+      forgium: {
+        schemaVersion: 1,
+        source: { type: "inbox", ref: item.id },
+        title: item.title,
+        goal: "",
+        acceptance: [],
+        constraints: [],
+        verification: { commands: [], requiredEvidence: [] },
+      },
+    })}---\n\n# ${kind === "spec" ? "Technical Spec" : "Architecture Decision"} — ${item.title}\n\n## Context\n\n${item.body ?? item.title}\n\n## Decisions\n\n${kind === "spec" ? "## Implementation slices\n" : "## Consequences\n"}`;
+  }
+
+  private async readDefinitionWorkDefinition(definitionPath: string, item: InboxItem): Promise<Omit<CreateFeatureInput, "source">> {
+    const raw = await fs.readFile(definitionPath, "utf8");
+    const match = raw.match(/^---\n([\s\S]*?)\n---\n?[\s\S]*$/);
+    if (!match) throw new InvalidInboxItemError(`Definition is missing frontmatter: ${item.definitionRef}`);
+    const parsed = YAML.parse(match[1]!) as { forgium?: Partial<CreateFeatureInput> & { schemaVersion?: number; source?: { type?: string; ref?: string } } };
+    const definition = parsed.forgium;
+    if (!definition || definition.schemaVersion !== 1 || definition.source?.type !== "inbox" || definition.source.ref !== item.id) {
+      throw new InvalidInboxItemError(`Definition does not reference Inbox item: ${item.id}`);
+    }
+    if (typeof definition.title !== "string" || typeof definition.goal !== "string" || !Array.isArray(definition.acceptance) || !definition.verification) {
+      throw new InvalidInboxItemError(`Definition has an incomplete Work definition: ${item.definitionRef}`);
+    }
+    const document = DefinitionDocumentSchema.safeParse({
+      schemaVersion: 1,
+      inboxRef: item.id,
+      kind: item.definitionKind,
+      title: definition.title,
+      goal: definition.goal,
+      acceptance: definition.acceptance,
+      verification: definition.verification,
+    });
+    if (!document.success) throw new InvalidInboxItemError(`Definition has an invalid Work contract: ${document.error.message}`);
+    return {
+      title: definition.title,
+      goal: definition.goal,
+      acceptance: definition.acceptance,
+      constraints: definition.constraints,
+      verification: definition.verification,
+      slug: definition.slug,
+    };
   }
 
   private async ensureGitignoreRuntime(): Promise<void> {

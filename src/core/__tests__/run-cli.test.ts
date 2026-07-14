@@ -34,16 +34,16 @@ describe("forgium run", () => {
     await expect(repo.listInbox()).resolves.toMatchObject([{ status: "captured" }]);
   });
 
-  it("stops before doing when no execution engine is configured", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-run-engine-test-"));
+  it("reports ready Work without starting implementation", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-run-ready-test-"));
     const repo = new FilesystemForgiumRepository(root);
     await repo.init();
-    const feature = await repo.createFeature({ title: "Ready work", goal: "Wait for an engine.", acceptance: ["It stays safe"] });
+    const feature = await repo.createFeature({ title: "Ready work", goal: "Wait for an engine.", acceptance: ["It stays safe"], verification: { commands: [{ name: "pass", run: "true" }] } });
 
     const result = await runCli(root, ["run", "--json"]);
 
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: "engine_unavailable", features: [{ id: feature.id, state: "ready" }] });
+    expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: "ready_for_implementation", features: [{ id: feature.id, state: "ready", action: "ready_for_implementation" }] });
     await expect(repo.getFeature(feature.id)).resolves.toMatchObject({ state: "ready" });
     await expect(fs.stat(path.join(root, ".forgium/runtime"))).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -52,25 +52,13 @@ describe("forgium run", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-run-dry-run-"));
     const repo = new FilesystemForgiumRepository(root);
     await repo.init();
-    const feature = await repo.createFeature({ title: "Dry run work", goal: "Preview safely.", acceptance: ["No mutation"] });
+    const feature = await repo.createFeature({ title: "Dry run work", goal: "Preview safely.", acceptance: ["No mutation"], verification: { commands: [{ name: "pass", run: "true" }] } });
 
     const result = await runCli(root, ["run", "--dry-run", "--json"]);
 
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: "dry_run" });
     await expect(repo.getFeature(feature.id)).resolves.toMatchObject({ state: "ready" });
-    await expect(repo.listDrafts()).resolves.toHaveLength(0);
   });
 
-  it("rejects an invalid budget combination", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-run-options-test-"));
-    const repo = new FilesystemForgiumRepository(root);
-    await repo.init();
-
-    const result = await runCli(root, ["run", "--until-empty", "--max-features", "2"]);
-
-    expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("RUN_OPTIONS_INVALID");
-  });
 });
-
