@@ -42,11 +42,11 @@ describe("forgium triage", () => {
 
     await run(process.execPath, [path.resolve(process.cwd(), "node_modules/tsx/dist/cli.mjs"), path.resolve(process.cwd(), "src/cli/index.ts"), "--root", root, "triage"], root, "t\nLet users choose a theme.\nA theme toggle is visible\n\n\nA theme toggle is visible:browser-check\n\n");
 
-    const inbox = JSON.parse((await cli(root, "--json", "inbox")).stdout)[0];
     const feature = JSON.parse((await cli(root, "--json", "work", "list", "--state", "ready")).stdout)[0];
 
-    expect(inbox).toMatchObject({ status: "promoted", featureRef: feature.id });
-    expect(feature.manifest).toMatchObject({ id: "feature-add-dark-mode", source: { type: "inbox", ref: inbox.id } });
+    expect(JSON.parse((await cli(root, "--json", "inbox")).stdout)).toEqual([]);
+    expect(feature.manifest).toMatchObject({ id: "feature-add-dark-mode", source: { type: "inbox", ref: expect.stringMatching(/^inbox-/) } });
+    await expect(fs.readdir(path.join(feature.path, "provenance", "inbox"))).resolves.toHaveLength(1);
   });
 
   it("marks an Inbox item needs-definition without creating executable Work", async () => {

@@ -65,6 +65,64 @@ describe("FilesystemForgiumRepository", () => {
     expect(done.state).toBe("done");
   });
 
+  it("moves Inbox provenance and classification evidence with its Work", async () => {
+    const { root, repo } = await tempRepo();
+    const inbox = await repo.capture({ text: "Add notifications\n\nNotify users about updates." });
+    await repo.recordClassification(inbox, {
+      route: "auto_direct",
+      size: "S",
+      estimatedTouchedFiles: 2,
+      complexityScore: 2,
+      confidence: 0.9,
+      risks: [],
+      rationale: ["Small isolated change."],
+      proposed: {
+        title: "Add notifications",
+        goal: "Notify users about updates.",
+        acceptance: ["Users see notifications."],
+        verification: { commands: [{ name: "pass", run: "true" }] },
+      },
+    }, "run-test");
+
+    const feature = await repo.createFeatureFromInbox(inbox.id, {
+      title: "Add notifications",
+      goal: "Notify users about updates.",
+      acceptance: ["Users see notifications."],
+      verification: { commands: [{ name: "pass", run: "true" }] },
+    });
+
+    expect(await repo.listInbox()).toEqual([]);
+    await expect(fs.readFile(path.join(feature.path, "provenance", "inbox", path.basename(inbox.path)), "utf8")).resolves.toContain("status: promoted");
+    await expect(fs.readdir(path.join(feature.path, "provenance", "classification"))).resolves.toEqual([`${inbox.id}-run-test.yaml`]);
+    await expect(fs.readdir(path.join(root, "product", "inbox-receipts"))).resolves.toEqual([]);
+
+    const done = await repo.startFeature(feature.id).then((item) => repo.submitForReview(item.id)).then((item) => repo.reviewFeature(item.id, "approved", "Reviewed."));
+    await expect(fs.stat(path.join(done.path, "provenance", "inbox", path.basename(inbox.path)))).resolves.toBeTruthy();
+    await expect(repo.validate()).resolves.toMatchObject({ valid: true });
+  });
+
+  it("migrates legacy promoted Inbox provenance without deleting evidence", async () => {
+    const { root, repo } = await tempRepo();
+    const inbox = await repo.capture({ text: "Add notifications" });
+    const feature = await repo.createFeature({
+      title: "Add notifications",
+      goal: "Notify users about updates.",
+      acceptance: ["Users see notifications."],
+      source: { type: "inbox", ref: inbox.id },
+      verification: { commands: [{ name: "pass", run: "true" }] },
+    });
+    await repo.recordClassification(inbox, {
+      route: "auto_direct", size: "XS", estimatedTouchedFiles: 1, complexityScore: 1, confidence: 0.9, risks: [], rationale: ["Small change."],
+      proposed: { title: "Add notifications", goal: "Notify users about updates.", acceptance: ["Users see notifications."], verification: { commands: [{ name: "pass", run: "true" }] } },
+    }, "run-legacy");
+    await fs.writeFile(inbox.path, (await fs.readFile(inbox.path, "utf8"))
+      .replace("status: captured\n", `status: promoted\nfeatureRef: ${feature.id}\n`));
+
+    await expect(repo.migrateInboxProvenance()).resolves.toEqual({ migrated: [inbox.id], skipped: [] });
+    await expect(fs.readFile(path.join(root, "features", "ready", "add-notifications", "provenance", "inbox", path.basename(inbox.path)), "utf8")).resolves.toContain(`featureRef: ${feature.id}`);
+    await expect(repo.validate()).resolves.toMatchObject({ valid: true });
+  });
+
   it("detects spec-flow execution profiles", async () => {
     const { repo } = await tempRepo();
     const feature = await repo.createFeature({ title: "Progressive Web App", goal: "Make storefronts installable.", acceptance: ["Manifest exists"], verification: { commands: [{ name: "pass", run: "true" }] } });

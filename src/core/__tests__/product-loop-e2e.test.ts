@@ -57,16 +57,16 @@ describe("Forgium product loop", () => {
 
     const inbox = JSON.parse((await cli(root, ["inbox", "--json"])).stdout) as Array<{ id: string; title: string; status: string; definitionRef?: string; definitionKind?: string }>;
     expect(inbox).toEqual(expect.arrayContaining([
-      expect.objectContaining({ title: "Change the call to action to blue", status: "promoted" }),
       expect.objectContaining({ title: "Add notifications", status: "needs_definition", definitionKind: "spec" }),
       expect.objectContaining({ title: "Choose notification delivery architecture", status: "needs_definition", definitionKind: "adr" }),
     ]));
+    expect(inbox).toHaveLength(2);
     const notifications = inbox.find((item) => item.title === "Add notifications")!;
     const architecture = inbox.find((item) => item.title === "Choose notification delivery architecture")!;
     expect(notifications.definitionRef).toMatch(/^docs\/specs\//);
     expect(architecture.definitionRef).toMatch(/^docs\/adr\//);
     const firstStatus = JSON.parse((await cli(root, ["status", "--json"])).stdout);
-    expect(firstStatus).toMatchObject({ inbox: { promoted: 1, needs_definition: 2 }, features: { ready: 1, doing: 0 } });
+    expect(firstStatus).toMatchObject({ inbox: { promoted: 0, needs_definition: 2 }, features: { ready: 1, doing: 0 } });
     await expect(fs.stat(path.join(root, ".forgium", "runtime"))).rejects.toMatchObject({ code: "ENOENT" });
 
     await fs.writeFile(path.join(root, notifications.definitionRef!), [
@@ -121,7 +121,8 @@ describe("Forgium product loop", () => {
       ]),
     });
     const finalStatus = JSON.parse((await cli(root, ["status", "--json"])).stdout);
-    expect(finalStatus).toMatchObject({ inbox: { promoted: 3, needs_definition: 0 }, features: { ready: 3, doing: 0, review: 0, done: 0 } });
+    expect(finalStatus).toMatchObject({ inbox: { promoted: 0, needs_definition: 0 }, features: { ready: 3, doing: 0, review: 0, done: 0 } });
+    expect(JSON.parse((await cli(root, ["inbox", "--json"])).stdout)).toEqual([]);
     expect(JSON.parse((await cli(root, ["validate", "--json"])).stdout)).toMatchObject({ valid: true });
     await expect(fs.stat(path.join(root, ".forgium", "runtime"))).rejects.toMatchObject({ code: "ENOENT" });
   });

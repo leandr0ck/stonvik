@@ -31,7 +31,7 @@ export class FilesystemForgiumRepository {
   constructor(public readonly root: string) { this.paths = forgiumPaths(root); }
 
   async init(): Promise<void> {
-    for (const dir of this.paths.requiredDirs) await fs.mkdir(dir, { recursive: true });
+    for (const dir of this.paths.createdDirs) await fs.mkdir(dir, { recursive: true });
     await this.ensureGitignoreRuntime();
   }
 
@@ -160,10 +160,9 @@ export class FilesystemForgiumRepository {
   async mergeInbox(id: string, featureId: string): Promise<InboxItem> {
     const item = await this.requireInbox(id);
     if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
-    if (!(await this.getFeature(featureId))) throw new FeatureNotFoundError(featureId);
-    const merged = { ...item, status: "merged" as const, featureRef: featureId };
-    await this.writeInboxItem(merged);
-    return merged;
+    const feature = await this.getFeature(featureId);
+    if (!feature) throw new FeatureNotFoundError(featureId);
+    return this.moveInboxProvenance(item, feature, "merged");
   }
 
   async createFeature(input: CreateFeatureInput): Promise<Feature> {
@@ -199,10 +198,14 @@ export class FilesystemForgiumRepository {
   }
 
   async recordClassification(item: InboxItem, classification: Classification, runId: string): Promise<void> {
+    const current = await this.requireInbox(item.id);
+    if (current.status !== "captured" && current.status !== "needs_definition") {
+      throw new InvalidInboxItemError(`Inbox item is already attached or closed: ${item.id}`);
+    }
     const parsed = ClassificationSchema.safeParse(classification);
     if (!parsed.success) throw new InvalidInboxItemError(`Invalid classification: ${parsed.error.message}`);
     await fs.mkdir(this.paths.inboxReceipts, { recursive: true });
-    const receipt = { schemaVersion: 1 as const, kind: "classification" as const, inboxId: item.id, runId, created: isoNow(), outcome: "classified" as const, classification: parsed.data };
+    const receipt = { schemaVersion: 1 as const, kind: "classification" as const, inboxId: current.id, runId, created: isoNow(), outcome: "classified" as const, classification: parsed.data };
     ClassificationReceiptSchema.parse(receipt);
     await this.writeFileAtomic(path.join(this.paths.inboxReceipts, `${item.id}-${runId}.yaml`), YAML.stringify(receipt));
   }
@@ -212,12 +215,29 @@ export class FilesystemForgiumRepository {
     if (item.status !== "captured" && item.status !== "needs_definition") throw new InvalidInboxItemError(`Inbox item cannot create Work: ${inboxId}`);
     const feature = await this.createFeature({ ...input, source: { type: "inbox", ref: item.id } });
     try {
-      await this.writeInboxItem({ ...item, status: "promoted", featureRef: feature.id });
+      await this.moveInboxProvenance(item, feature, "promoted");
     } catch (error) {
       await fs.rm(feature.path, { recursive: true, force: true });
       throw error;
     }
     return feature;
+  }
+
+  async migrateInboxProvenance(): Promise<{ migrated: string[]; skipped: Array<{ inboxId: string; reason: string }> }> {
+    await this.assertInitialized();
+    const migrated: string[] = [];
+    const skipped: Array<{ inboxId: string; reason: string }> = [];
+    for (const item of await this.listInbox()) {
+      if ((item.status !== "promoted" && item.status !== "merged") || !item.featureRef) continue;
+      const feature = await this.getFeature(item.featureRef);
+      if (!feature) {
+        skipped.push({ inboxId: item.id, reason: `Referenced Work does not exist: ${item.featureRef}` });
+        continue;
+      }
+      await this.moveInboxProvenance(item, feature, item.status);
+      migrated.push(item.id);
+    }
+    return { migrated, skipped };
   }
 
   async listReceipts(featureId: string): Promise<Receipt[]> {
@@ -428,8 +448,12 @@ export class FilesystemForgiumRepository {
       for (const entry of await safeReaddir(this.paths.featureStateDir(state))) {
         const full = this.paths.featureDir(state, entry);
         if (!(await fs.stat(full)).isDirectory()) continue;
-        try { await this.readFeature(full, state); } catch (error) { issues.push({ severity: "error", code: "INVALID_FEATURE", message: String((error as Error).message), path: full }); }
+        let feature: Feature | undefined;
+        try { feature = await this.readFeature(full, state); } catch (error) { issues.push({ severity: "error", code: "INVALID_FEATURE", message: String((error as Error).message), path: full }); }
         try { await this.validateReceiptFiles(full); } catch (error) { issues.push({ severity: "error", code: "INVALID_RECEIPT", message: String((error as Error).message), path: full }); }
+        if (feature) {
+          try { await this.validateInboxProvenance(feature); } catch (error) { issues.push({ severity: "error", code: "INVALID_INBOX_PROVENANCE", message: String((error as Error).message), path: full }); }
+        }
       }
     }
     return { valid: issues.filter((i) => i.severity === "error").length === 0, issues };
@@ -464,6 +488,73 @@ export class FilesystemForgiumRepository {
     const item = (await this.listInbox()).find((candidate) => candidate.id === id);
     if (!item) throw new InvalidInboxItemError(`Inbox item not found: ${id}`);
     return item;
+  }
+
+  private provenanceInboxDir(featurePath: string): string { return path.join(featurePath, "provenance", "inbox"); }
+  private provenanceClassificationDir(featurePath: string): string { return path.join(featurePath, "provenance", "classification"); }
+
+  private async moveInboxProvenance(item: InboxItem, feature: Feature, status: "promoted" | "merged"): Promise<InboxItem> {
+    const original = await fs.readFile(item.path, "utf8");
+    const inboxPath = path.join(this.provenanceInboxDir(feature.path), path.basename(item.path));
+    const receiptPaths = await this.classificationReceiptPaths(item.id);
+    const receiptDestination = this.provenanceClassificationDir(feature.path);
+    const movedReceipts: Array<{ from: string; to: string }> = [];
+    if (await exists(inboxPath)) throw new InvalidInboxItemError(`Inbox provenance already exists: ${path.relative(this.root, inboxPath)}`);
+    for (const receiptPath of receiptPaths) {
+      const destination = path.join(receiptDestination, path.basename(receiptPath));
+      if (await exists(destination)) throw new InvalidInboxItemError(`Classification provenance already exists: ${path.relative(this.root, destination)}`);
+      movedReceipts.push({ from: receiptPath, to: destination });
+    }
+
+    const moved = { ...item, status, featureRef: feature.id, path: inboxPath };
+    try {
+      await fs.mkdir(path.dirname(inboxPath), { recursive: true });
+      await fs.rename(item.path, inboxPath);
+      await this.writeInboxItem(moved);
+      await fs.mkdir(receiptDestination, { recursive: true });
+      for (const receipt of movedReceipts) await fs.rename(receipt.from, receipt.to);
+      return moved;
+    } catch (error) {
+      for (const receipt of [...movedReceipts].reverse()) {
+        if (await exists(receipt.to)) await fs.rename(receipt.to, receipt.from);
+      }
+      if (await exists(inboxPath)) await fs.rm(inboxPath, { force: true });
+      if (!(await exists(item.path))) await this.writeFileAtomic(item.path, original);
+      throw error;
+    }
+  }
+
+  private async classificationReceiptPaths(inboxId: string): Promise<string[]> {
+    const paths: string[] = [];
+    for (const entry of (await safeReaddir(this.paths.inboxReceipts)).filter((name) => name.endsWith(".yaml"))) {
+      const receiptPath = path.join(this.paths.inboxReceipts, entry);
+      if (entry.startsWith(`${inboxId}-`)) {
+        paths.push(receiptPath);
+        continue;
+      }
+      try {
+        const receipt = ClassificationReceiptSchema.parse(YAML.parse(await fs.readFile(receiptPath, "utf8")));
+        if (receipt.inboxId === inboxId) paths.push(receiptPath);
+      } catch {
+        // Invalid unrelated receipts remain in the global directory for validate().
+      }
+    }
+    return paths;
+  }
+
+  private async validateInboxProvenance(feature: Feature): Promise<void> {
+    const inboxIds = new Set<string>();
+    for (const entry of (await safeReaddir(this.provenanceInboxDir(feature.path))).filter((name) => name.endsWith(".md"))) {
+      const item = await this.readInboxFile(path.join(this.provenanceInboxDir(feature.path), entry));
+      if ((item.status !== "promoted" && item.status !== "merged") || item.featureRef !== feature.id) {
+        throw new InvalidInboxItemError(`Inbox provenance ${item.id} does not reference Work ${feature.id}.`);
+      }
+      inboxIds.add(item.id);
+    }
+    for (const entry of (await safeReaddir(this.provenanceClassificationDir(feature.path))).filter((name) => name.endsWith(".yaml"))) {
+      const receipt = ClassificationReceiptSchema.parse(YAML.parse(await fs.readFile(path.join(this.provenanceClassificationDir(feature.path), entry), "utf8")));
+      if (!inboxIds.has(receipt.inboxId)) throw new InvalidInboxItemError(`Classification provenance references unattached Inbox item: ${receipt.inboxId}`);
+    }
   }
 
   private async assertInitialized(): Promise<void> {

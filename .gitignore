@@ -3,4 +3,3 @@ dist/
 .forgium/runtime/
 *.tmp
 .spec-flow/
-docs/

@@ -28,7 +28,10 @@ describe("autonomous run loop", () => {
     });
     expect(result.stopReason).toBe("idle");
     expect((await repo.getStatus()).features.done).toBe(1);
-    expect((await repo.listInbox())[0]?.status).toBe("promoted");
+    expect(await repo.listInbox()).toEqual([]);
+    const done = (await repo.listFeatures("done"))[0]!;
+    await expect(fs.readdir(path.join(done.path, "provenance", "inbox"))).resolves.toHaveLength(1);
+    await expect(fs.readdir(path.join(done.path, "provenance", "classification"))).resolves.toHaveLength(1);
     expect((await repo.validate()).valid).toBe(true);
   });
 });

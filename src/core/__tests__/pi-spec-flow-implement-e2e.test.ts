@@ -20,9 +20,10 @@ async function cli(root: string, args: string[], env: NodeJS.ProcessEnv = proces
   });
 }
 
-describe("Forgium implement + real Pi Spec Flow", () => {
-  e2e("fails closed and leaves Work doing when Pi does not return a structured completion status", async () => {
+describe("Forgium run + real Pi Spec Flow", () => {
+  e2e("runs Spec Flow through the autonomous loop and requires independent review before done", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-implement-pi-e2e-"));
+    const env = { ...process.env, FORGIUM_PI_COMMAND: process.env.FORGIUM_PI_COMMAND ?? "pi" };
     let passed = false;
     try {
       expect((await cli(root, ["init", "--json"])).code).toBe(0);
@@ -60,15 +61,21 @@ describe("Forgium implement + real Pi Spec Flow", () => {
         "Edit only target.txt, verify it, fill all handoff fields, and close this ticket with the Spec Flow handoff tool.",
       ].join("\n"));
 
-      const implementation = await cli(root, ["implement", work.id, "--json"]);
+      const implementation = await cli(root, ["run", "--json"], env);
       expect(implementation.code).toBe(0);
-      expect(JSON.parse(implementation.stdout)).toMatchObject({ outcome: "needs_human", feature: { state: "doing" } });
-      const status = await cli(root, ["status", "--verbose", "--json"]);
-      expect(JSON.parse(status.stdout)).toMatchObject({ implementations: [expect.objectContaining({ id: work.id, state: "doing", nextAction: expect.stringContaining("structured status") })] });
-      expect(JSON.parse((await cli(root, ["validate", "--json"])).stdout)).toMatchObject({ valid: true });
+      const run = JSON.parse(implementation.stdout) as { stopReason: string; features: Array<{ id: string; state: string; action: string }> };
+      expect(run.features).toEqual(expect.arrayContaining([expect.objectContaining({ id: work.id, state: "review", action: "completed" })]));
+      expect(["idle", "review_needs_human"]).toContain(run.stopReason);
+      if (run.stopReason === "idle") expect(run.features).toEqual(expect.arrayContaining([expect.objectContaining({ id: work.id, state: "done", action: "approved" })]));
+      else expect(run.features).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: work.id, state: "done" })]));
+      const status = await cli(root, ["status", "--json"], env);
+      const statusData = JSON.parse(status.stdout) as { features: Record<string, number> };
+      expect(statusData.features.doing).toBe(0);
+      expect(statusData.features.done + statusData.features.review).toBe(1);
+      expect(JSON.parse((await cli(root, ["validate", "--json"], env)).stdout)).toMatchObject({ valid: true });
       passed = true;
     } finally {
-      if (!passed || process.env.FORGIUM_E2E_KEEP === "1") console.error(`Forgium implementation Pi E2E retained at: ${root}`);
+      if (!passed || process.env.FORGIUM_E2E_KEEP === "1") console.error(`Forgium Spec Flow real E2E retained at: ${root}`);
       else await fs.rm(root, { recursive: true, force: true });
     }
   }, 150_000);

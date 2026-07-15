@@ -105,8 +105,8 @@ raw request
 
 ```text
 product/
-├── inbox/                  # Raw product intent
-├── inbox-receipts/         # Classification evidence
+├── inbox/                  # Unresolved raw product intent
+├── inbox-receipts/         # Classification evidence not yet attached to Work
 └── events/                 # Durable RunEvent NDJSON
 
 features/
@@ -120,9 +120,14 @@ features/
 
 It also adds `.forgium/runtime/` to `.gitignore`. Runtime leases created when work starts are local process metadata; the Inbox and Work directories are intended to be committed to Git. The runtime directory is created only when it is needed.
 
-Each Work item is a directory containing at least a `manifest.yaml`. You can
-add supporting artifacts to it, such as `spec.md`, `tickets/`, `notes.md`, or
-`research.md`.
+Each Work item is a directory containing at least a `manifest.yaml`. Inbox
+items promoted or merged into a Work move to `provenance/inbox/`, alongside
+their classification evidence in `provenance/classification/`; that evidence
+then travels with the Work through `done`. You can add supporting artifacts to
+it, such as `spec.md`, `tickets/`, `notes.md`, or `research.md`.
+
+Repositories created with an earlier Forgium version can relocate their
+historical Inbox evidence with `forgium migrate inbox-provenance`.
 
 ## Typical workflow
 

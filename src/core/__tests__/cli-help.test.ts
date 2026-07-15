@@ -14,6 +14,7 @@ describe("CLI command surface", () => {
     expect(stdout).toContain("run");
     expect(stdout).toContain("work");
     expect(stdout).toContain("implement");
+    expect(stdout).toContain("definition");
 
     const { stdout: runHelp } = await execFile(process.execPath, [tsx, cliPath, "run", "--help"], { cwd: process.cwd() });
     expect(runHelp).not.toContain("--engine");

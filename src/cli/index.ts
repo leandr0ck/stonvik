@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import { AgentLoop, ExecutionAdapterRegistry, FilesystemForgiumRepository, ForgiumError, SpecFlowExecutionAdapter, findRepositoryRoot, type Classification, type FeatureState, type InboxItem, type RunEvent } from "../core/index.js";
@@ -43,6 +44,15 @@ program.command("inbox")
     output(items, items.length ? items.map((i) => `${i.id}\t${i.status}\t${i.created}\t${i.title}`).join("\n") : "Inbox is empty");
   });
 
+const migrate = program.command("migrate").description("Migrate durable Forgium state to the current layout");
+migrate.command("inbox-provenance")
+  .description("Move legacy promoted Inbox items and classification receipts into their Work")
+  .action(async () => {
+    const repo = await repoForCommand();
+    const result = await repo.migrateInboxProvenance();
+    output(result, `Migrated Inbox provenance: ${result.migrated.length}${result.skipped.length ? `\nSkipped: ${result.skipped.map((item) => `${item.inboxId} (${item.reason})`).join(", ")}` : ""}`);
+  });
+
 program.command("triage")
   .description("Classify captured Inbox items into executable Work")
   .option("--non-interactive", "never prompt or approve captured Inbox items")
@@ -51,6 +61,19 @@ program.command("triage")
     const repo = await repoForCommand();
     const result = await triage(repo, opts);
     output(result, renderTriage(result));
+  });
+
+const definition = program.command("definition").description("Edit and inspect human Work definitions");
+definition.command("edit <inboxId>")
+  .description("Open the pending Inbox definition in the configured editor")
+  .action(async (inboxId: string) => {
+    const repo = await repoForCommand();
+    const item = (await repo.listInbox()).find((candidate) => candidate.id === inboxId);
+    if (!item || item.status !== "needs_definition" || !item.definitionRef) throw new ForgiumError(`Inbox item has no pending definition: ${inboxId}`, "DEFINITION_NOT_PENDING", 2);
+    const editor = process.env.EDITOR ?? process.env.VISUAL;
+    if (!editor) throw new ForgiumError("Set VISUAL or EDITOR before editing a definition.", "EDITOR_NOT_CONFIGURED", 2);
+    execFileSync(editor, [path.resolve(repo.root, item.definitionRef)], { cwd: repo.root, stdio: "inherit" });
+    output({ inboxId: item.id, definitionRef: item.definitionRef }, `Edited ${item.definitionRef}`);
   });
 
 program.command("run")
@@ -308,7 +331,7 @@ async function runLoop(repo: FilesystemForgiumRepository, options: RunOptions, i
     });
     return {
       root: result.root,
-      actions: result.actions.map((action) => ({ kind: "inbox" as const, id: action.id, action: action.action, definitionRef: action.nextAction })),
+      actions: result.actions.map((action) => ({ kind: "inbox" as const, id: action.id, action: action.action, definitionRef: action.definitionRef, definitionKind: action.definitionKind })),
       features: result.features,
       stopReason: result.stopReason,
       nextAction: result.nextAction,
@@ -339,7 +362,7 @@ async function watchLoop(repo: FilesystemForgiumRepository, options: RunOptions,
         onEvent: async (event) => { events.push(event); if (program.opts<GlobalOptions>().json) console.log(JSON.stringify(event)); else console.log(`[${event.type}] ${event.message}${event.nextAction ? ` Next: ${event.nextAction}` : ""}`); },
       });
       if (program.opts<GlobalOptions>().json) console.log(JSON.stringify({ type: "stop", at: new Date().toISOString(), message: `Loop stopped: ${result.stopReason}.`, stopReason: result.stopReason, nextAction: result.nextAction }));
-      else console.log(renderRun({ root: result.root, actions: result.actions.map((a) => ({ kind: "inbox", id: a.id, action: a.action })), features: result.features, stopReason: result.stopReason, nextAction: result.nextAction }));
+      else console.log(renderRun({ root: result.root, actions: result.actions.map((a) => ({ kind: "inbox", id: a.id, action: a.action, definitionRef: a.definitionRef, definitionKind: a.definitionKind })), features: result.features, stopReason: result.stopReason, nextAction: result.nextAction }));
     } finally { prompt.close(); }
   };
   await run();
@@ -463,7 +486,7 @@ function renderTriage(result: TriageResult): string {
 }
 function renderRun(result: RunResult): string {
   const events = result.events?.length ? `\n\nEvents\n${result.events.map((event) => `  [${event.type}] ${event.message}${event.nextAction ? ` — Next: ${event.nextAction}` : ""}`).join("\n")}` : "";
-  return `Forgium run\n  Actions: ${result.actions.length}\n  Features: ${result.features.length}${renderSpecActions(result.actions)}\n  Stop: ${result.stopReason}${result.nextAction ? `\n  Next: ${result.nextAction}` : ""}${events}`;
+  return `Forgium run\n  Actions: ${result.actions.length}\n  Features: ${new Set(result.features.map((f) => f.id)).size}${renderSpecActions(result.actions)}\n  Stop: ${result.stopReason}${result.nextAction ? `\n  Next: ${result.nextAction}` : ""}${events}`;
 }
 function renderSpecActions(actions: TriageAction[]): string {
   const definitions = actions.filter((action) => action.definitionRef).map((action) => `${action.definitionKind}: ${action.definitionRef}`);

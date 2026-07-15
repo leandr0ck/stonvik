@@ -15,6 +15,7 @@ export function forgiumPaths(root: string) {
     featureStateDir: (state: string) => path.join(features, state),
     featureDir: (state: string, slug: string) => path.join(features, state, slug),
     definitionDir: (slug: string) => path.join(definitions, slug),
-    requiredDirs: [inbox, definitions, ...FEATURE_STATES.map((s) => path.join(features, s))]
+    requiredDirs: [inbox, definitions, ...FEATURE_STATES.map((s) => path.join(features, s))],
+    createdDirs: [inbox, path.join(product, "inbox-receipts"), path.join(product, "events"), definitions, ...FEATURE_STATES.map((s) => path.join(features, s))]
   };
 }

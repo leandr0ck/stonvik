@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: Offline contract and quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: bun install --frozen-lockfile
+      - run: npm test
+      - run: npm run test:e2e:offline
+      - run: npm run typecheck
+      - run: npm run build
+      - run: git diff --check
+
+  real-pi:
+    name: Opt-in real Pi contract
+    if: ${{ vars.FORGIUM_RUN_REAL_E2E == '1' }}
+    runs-on: ubuntu-latest
+    environment: real-e2e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: bun install --frozen-lockfile
+      - run: npm run test:release
+        env:
+          FORGIUM_PI_COMMAND: ${{ vars.FORGIUM_PI_COMMAND || 'pi' }}

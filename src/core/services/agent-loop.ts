@@ -23,7 +23,7 @@ export interface AgentLoopOptions {
 
 export interface AgentLoopResult {
   root: string;
-  actions: Array<{ kind: "inbox" | "work"; id: string; action: string; nextAction?: string }>;
+  actions: Array<{ kind: "inbox" | "work"; id: string; action: string; nextAction?: string; definitionRef?: string; definitionKind?: "spec" | "adr" }>;
   features: Array<{ id: string; state: FeatureState; action: string }>;
   stopReason: string;
   nextAction?: string;
@@ -96,8 +96,11 @@ export class AgentLoop {
 
   private async processDefinitions(result: AgentLoopResult, options: AgentLoopOptions, emit: (event: Omit<RunEvent, "at">) => Promise<void>): Promise<{ reason: string; nextAction: string } | null> {
     for (const item of (await this.repo.listInbox()).filter((candidate) => candidate.status === "needs_definition")) {
-      if (options.dryRun) { result.actions.push({ kind: "inbox", id: item.id, action: "definition_confirmation_planned", nextAction: `Complete and confirm ${item.definitionRef}.` }); return { reason: "dry_run", nextAction: `Complete and confirm ${item.definitionRef}.` }; }
-      if (options.nonInteractive || !options.confirmDefinition) return { reason: "human_definition_required", nextAction: `Complete and confirm ${item.definitionRef}.` };
+      if (options.dryRun) { result.actions.push({ kind: "inbox", id: item.id, action: "definition_confirmation_planned", nextAction: `Complete and confirm ${item.definitionRef}.`, definitionRef: item.definitionRef, definitionKind: item.definitionKind }); return { reason: "dry_run", nextAction: `Complete and confirm ${item.definitionRef}.` }; }
+      if (options.nonInteractive || !options.confirmDefinition) {
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition_confirmation", nextAction: `Complete and confirm ${item.definitionRef}.`, definitionRef: item.definitionRef, definitionKind: item.definitionKind });
+        return { reason: "human_definition_required", nextAction: `Complete and confirm ${item.definitionRef}.` };
+      }
       if (await options.confirmDefinition(item)) {
         try {
           const feature = await this.repo.confirmDefinitionForInbox(item.id);
@@ -107,7 +110,10 @@ export class AgentLoop {
           await emit({ type: "gate", inboxId: item.id, message: `Definition is invalid: ${String((error as Error).message)}`, nextAction: `Complete ${item.definitionRef} and run again.` });
           return { reason: "definition_invalid", nextAction: `Complete ${item.definitionRef} and run again.` };
         }
-      } else return { reason: "human_definition_required", nextAction: `Confirm the completed definition at ${item.definitionRef}.` };
+      } else {
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition_confirmation", nextAction: `Confirm the completed definition at ${item.definitionRef}.`, definitionRef: item.definitionRef, definitionKind: item.definitionKind });
+        return { reason: "human_definition_required", nextAction: `Confirm the completed definition at ${item.definitionRef}.` };
+      }
     }
     return null;
   }
@@ -143,7 +149,7 @@ export class AgentLoop {
         await emit({ type: "transition", inboxId: item.id, workId: feature.id, state: "ready", message: `Promoted ${item.id} to ready Work ${feature.id}.` });
       } else if (choice === "spec" || choice === "adr") {
         const updated = await this.repo.requireDefinitionForInbox(item.id, choice);
-        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition", nextAction: `Complete ${updated.definitionRef}.` });
+        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition", nextAction: `Complete ${updated.definitionRef}.`, definitionRef: updated.definitionRef, definitionKind: updated.definitionKind });
         return { reason: "human_definition_required", nextAction: `Complete ${updated.definitionRef} and run again.` };
       } else if (choice === "defer") {
         await this.repo.deferInbox(item.id);
