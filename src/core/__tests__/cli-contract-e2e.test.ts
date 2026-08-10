@@ -88,14 +88,21 @@ describe("Forgium autonomous CLI contract", () => {
 
     const result = await cli(root, ["run"], { ...process.env, FORGIUM_PI_COMMAND: pi });
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Stop: human_input_required");
-    expect(result.stdout).toContain("Next: Review and classify Inbox item inbox-");
+    expect(result.stdout).toContain("Forgium status after run");
+    expect(result.stdout).toContain("captured: 1");
+    expect(result.stdout).toContain("Forgium could not create a complete Work proposal after one automatic repair attempt. Your Inbox is unchanged.");
+    expect(result.stdout).toContain("Next: Run `forgium triage` to create the Work manually. Your Inbox has not been changed.");
     expect(result.stdout).not.toContain("Definition required:");
     expect(await json(root, ["inbox"])).toMatchObject([{ status: "captured" }]);
     const date = new Date().toISOString().slice(0, 10);
     const events = (await fs.readFile(path.join(root, "product", "events", `${date}.ndjson`), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "gate", inboxId: expect.stringMatching(/^inbox-/), nextAction: expect.stringContaining("Review and classify Inbox item") }),
+      expect.objectContaining({
+        type: "gate",
+        inboxId: expect.stringMatching(/^inbox-/),
+        message: expect.stringContaining("Forgium could not create a complete Work proposal after one automatic repair attempt."),
+        nextAction: expect.stringContaining("Run `forgium triage` to create the Work manually"),
+      }),
     ]));
   }, 30_000);
 
@@ -110,7 +117,7 @@ describe("Forgium autonomous CLI contract", () => {
     const customPi = await fakePiWithClassification(root, classification);
     const result = await cli(root, ["run"], { ...process.env, FORGIUM_PI_COMMAND: customPi }, "s\n");
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Definition required: spec:");
+    expect(result.stdout).toContain("awaiting definition: 1");
     expect(await json(root, ["work", "list", "--state", "ready"])).toEqual([]);
     expect(await json(root, ["inbox"])).toMatchObject([{ status: "needs_definition", definitionKind: "spec" }]);
   }, 30_000);
@@ -150,7 +157,8 @@ describe("Forgium autonomous CLI contract", () => {
     });
     const result = await cli(root, ["run"], { ...process.env, FORGIUM_PI_COMMAND: pi }, "p\n");
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Stop: split_required");
+    expect(result.stdout).toContain("captured: 1");
+    expect(result.stdout).toContain("Split inbox-");
     expect(await json(root, ["work", "list", "--state", "ready"])).toEqual([]);
     expect(await json(root, ["inbox"])).toMatchObject([{ status: "captured" }]);
   }, 30_000);
@@ -196,7 +204,7 @@ describe("Forgium autonomous CLI contract", () => {
       proposed: { title: "Add notifications", goal: "Add notifications.", acceptance: ["Users see notifications."], verification: { commands: [{ name: "target-content", run: "test \"$(cat target.txt)\" = \"after\"" }] } },
     });
     const first = await cli(root, ["run"], { ...process.env, FORGIUM_PI_COMMAND: classifier }, "s\n");
-    expect(first.stdout).toContain("Stop: human_definition_required");
+    expect(first.stdout).toContain("awaiting definition: 1");
     const item = (await json(root, ["inbox"])).find((candidate: { status: string }) => candidate.status === "needs_definition") as { id: string };
     const editor = await definitionEditor(root, item.id);
     const edited = await cli(root, ["definition", "edit", item.id], { ...process.env, EDITOR: editor });

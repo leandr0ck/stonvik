@@ -36,12 +36,18 @@ program.command("capture")
     output(item, `Captured ${item.id}\n${relative(repo.root, item.path)}`);
   });
 
-program.command("inbox")
-  .description("List Inbox items")
-  .action(async () => {
+const inbox = program.command("inbox").description("List Inbox items");
+inbox.action(async () => {
+  const repo = await repoForCommand();
+  const items = await repo.listInbox();
+  output(items, items.length ? items.map((i) => `${i.id}\t${i.status}\t${i.created}\t${i.title}`).join("\n") : "Inbox is empty");
+});
+inbox.command("answer <inboxId> <answer...>")
+  .description("Answer a pending direct clarification")
+  .action(async (inboxId: string, answer: string[]) => {
     const repo = await repoForCommand();
-    const items = await repo.listInbox();
-    output(items, items.length ? items.map((i) => `${i.id}\t${i.status}\t${i.created}\t${i.title}`).join("\n") : "Inbox is empty");
+    const item = await repo.answerInboxClarification(inboxId, answer.join(" "));
+    output(item, `Recorded clarification for ${item.id}`);
   });
 
 const migrate = program.command("migrate").description("Migrate durable Forgium state to the current layout");
@@ -81,7 +87,11 @@ program.command("run")
   .option("--non-interactive", "never prompt or approve captured Inbox items")
   .option("--dry-run", "show planned actions without writing")
   .option("--watch", "wait for durable changes and resume the loop")
-  .action(async (opts: { nonInteractive?: boolean; dryRun?: boolean; watch?: boolean }) => {
+  .option("--progress <mode>", "progress output: auto, off, plain, or ndjson", "auto")
+  .action(async (opts: { nonInteractive?: boolean; dryRun?: boolean; watch?: boolean; progress: ProgressMode }) => {
+    const requestedProgress = parseProgressMode(opts.progress);
+    const progress: ProgressMode = opts.watch && requestedProgress === "auto" && program.opts<GlobalOptions>().json ? "ndjson" : requestedProgress;
+    if (progress === "ndjson" && !program.opts<GlobalOptions>().json) throw new ForgiumError("--progress ndjson requires --json.", "PROGRESS_NDJSON_REQUIRES_JSON", 2);
     const repo = await repoForCommand();
     let interrupted = false;
     const controller = new AbortController();
@@ -89,10 +99,12 @@ program.command("run")
     process.once("SIGINT", onInterrupt);
     process.once("SIGTERM", onInterrupt);
     try {
-      if (opts.watch) await watchLoop(repo, { ...opts, signal: controller.signal }, () => interrupted);
+      if (opts.watch) await watchLoop(repo, { ...opts, progress, signal: controller.signal }, () => interrupted);
       else {
-        const result = await runLoop(repo, { ...opts, signal: controller.signal }, () => interrupted);
-        output(result, renderRun(result));
+        const result = await runLoop(repo, { ...opts, progress, signal: controller.signal }, () => interrupted);
+        const status = await repo.getStatus();
+        const includeEvents = result.stopReason !== "idle" && progress !== "off" && progress !== "plain" && !(progress === "auto" && Boolean(process.stdout.isTTY));
+        if (progress !== "ndjson") output({ ...result, status }, renderRun(result, status, includeEvents));
       }
     } finally {
       process.removeListener("SIGINT", onInterrupt);
@@ -208,15 +220,36 @@ async function repoForCommand(): Promise<FilesystemForgiumRepository> {
 
 function output(data: unknown, human: string): void { if (program.opts<GlobalOptions>().json) console.log(JSON.stringify(data, null, 2)); else console.log(human); }
 function relative(root: string, p: string): string { return path.relative(root, p) || "."; }
+
+function parseProgressMode(value: string | undefined): ProgressMode {
+  if (value === "auto" || value === "off" || value === "plain" || value === "ndjson") return value;
+  throw new ForgiumError(`Invalid progress mode: ${value}. Use auto, off, plain, or ndjson.`, "PROGRESS_MODE_INVALID", 2);
+}
+
+function renderProgress(event: RunEvent, mode: ProgressMode): void {
+  // RPC activity is intentionally available to structured consumers, but is
+  // too noisy for the human terminal. Lifecycle events and heartbeats provide
+  // the useful progress signal without mirroring agent chatter.
+  if (mode !== "ndjson" && event.kind === "agent.activity") return;
+  if (mode === "ndjson") {
+    console.log(JSON.stringify(event));
+    return;
+  }
+  const target = program.opts<GlobalOptions>().json ? process.stderr : process.stdout;
+  const subject = event.workId ?? event.inboxId;
+  target.write(`[${event.phase ?? event.type}]${subject ? ` ${subject}` : ""} — ${event.message}\n`);
+  if (event.nextAction) target.write(`  Next: ${event.nextAction}\n`);
+}
 function renderStatus(status: Awaited<ReturnType<FilesystemForgiumRepository["getStatus"]>>, implementations?: Array<{ id: string; state: FeatureState; observation?: unknown; nextAction: string }>): string {
   const details = implementations?.length ? `\n\nImplementation\n${implementations.map((item) => `  ${item.id}: ${item.state} — ${item.nextAction}`).join("\n")}` : "";
-  return `Inbox\n  captured: ${status.inbox.captured ?? 0}\n  needs definition: ${status.inbox.needs_definition ?? 0}\n  promoted: ${status.inbox.promoted ?? 0}\n  merged: ${status.inbox.merged ?? 0}\n  deferred: ${status.inbox.deferred ?? 0}\n  rejected: ${status.inbox.rejected ?? 0}\n\nWork\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}\n  done: ${status.features.done}${details}`;
+  return `Inbox\n  captured: ${status.inbox.captured ?? 0}\n  needs clarification: ${status.inbox.needs_clarification ?? 0}\n  needs definition: ${status.inbox.needs_definition ?? 0}\n  promoted: ${status.inbox.promoted ?? 0}\n  merged: ${status.inbox.merged ?? 0}\n  deferred: ${status.inbox.deferred ?? 0}\n  rejected: ${status.inbox.rejected ?? 0}\n\nWork\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}\n  done: ${status.features.done}${details}`;
 }
 
 interface TriageOptions { nonInteractive?: boolean; dryRun?: boolean }
 interface TriageAction { kind: "inbox"; id: string; action: string; definitionRef?: string; definitionKind?: "spec" | "adr" }
 interface TriageResult { root: string; actions: TriageAction[]; stopReason: string }
-interface RunOptions { nonInteractive?: boolean; dryRun?: boolean; watch?: boolean; signal?: AbortSignal }
+type ProgressMode = "auto" | "off" | "plain" | "ndjson";
+interface RunOptions { nonInteractive?: boolean; dryRun?: boolean; watch?: boolean; progress?: ProgressMode; signal?: AbortSignal }
 interface RunFeature { id: string; state: FeatureState; action: string }
 interface RunResult { root: string; actions: TriageAction[]; features: RunFeature[]; stopReason: string; nextAction?: string; events?: RunEvent[] }
 
@@ -262,12 +295,12 @@ async function triage(repo: FilesystemForgiumRepository, options: TriageOptions)
         continue;
       }
 
-      const action = await prompt.ask(`Inbox ${item.id} (${item.title}): [t]icket [s]pec requerida [a]dr requerida [d]iferir [r]echazar [m]ezclar [q]salir `, true);
+      const action = await prompt.ask(`Inbox ${item.id} (${item.title}): create [w]ork [s]pec [a]dr [d]efer [r]eject [m]erge [q]uit `, true);
       if (action === "s" || action === "a") {
         const definitionKind = action === "s" ? "spec" : "adr";
         const needsDefinition = await repo.requireDefinitionForInbox(item.id, definitionKind, !process.env.FORGIUM_PI_COMMAND);
         result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition", definitionRef: needsDefinition.definitionRef, definitionKind });
-      } else if (action === "t") {
+      } else if (action === "w" || action === "t") {
         const definition = await defineWork(prompt.ask);
         if (!definition) {
           result.actions.push({ kind: "inbox", id: item.id, action: "needs_input" });
@@ -307,7 +340,7 @@ async function runLoop(repo: FilesystemForgiumRepository, options: RunOptions, i
   // Without a configured agent, preserve a safe human-only recovery pass. The
   // autonomous path is selected as soon as FORGIUM_PI_COMMAND is configured;
   // no unstructured local process is treated as a state authority.
-  if (!process.env.FORGIUM_PI_COMMAND && !process.stdin.isTTY) {
+  if (!process.env.FORGIUM_PI_COMMAND && !process.stdin.isTTY && options.progress !== "plain" && options.progress !== "ndjson") {
     const triageResult = await triage(repo, { nonInteractive: options.nonInteractive, dryRun: options.dryRun });
     const ready = await repo.listFeatures("ready");
     return {
@@ -321,13 +354,19 @@ async function runLoop(repo: FilesystemForgiumRepository, options: RunOptions, i
   try {
     const loop = new AgentLoop(repo);
     const events: RunEvent[] = [];
+    const progress = options.progress ?? "auto";
+    const stream = progress === "plain" || progress === "ndjson" || (progress === "auto" && Boolean(process.stdout.isTTY));
     const result = await loop.run({
       dryRun: options.dryRun,
       nonInteractive: options.nonInteractive,
       signal: options.signal ?? (isInterrupted() ? AbortSignal.abort() : undefined),
       chooseClassification: async (item, classification) => chooseClassification(prompt, item, classification),
+      answerClarification: async (_item, question) => prompt.ask(`${question} `),
       confirmDefinition: async (item) => (await prompt.ask(`Definición ${item.definitionRef}: [c]onfirmar [s]altar [q]salir `, true)) === "c",
-      onEvent: (event) => { events.push(event); },
+      onEvent: (event) => {
+        events.push(event);
+        if (stream) renderProgress(event, progress);
+      },
     });
     return {
       root: result.root,
@@ -353,16 +392,20 @@ async function watchLoop(repo: FilesystemForgiumRepository, options: RunOptions,
     const loop = new AgentLoop(repo);
     const prompt = createPromptSession();
     try {
+      const progress = options.progress ?? (program.opts<GlobalOptions>().json ? "ndjson" : "plain");
+      const stream = progress !== "off";
       const result = await loop.run({
         dryRun: options.dryRun,
         nonInteractive: options.nonInteractive,
         chooseClassification: async (item, classification) => chooseClassification(prompt, item, classification),
+        answerClarification: async (_item, question) => prompt.ask(`${question} `),
         confirmDefinition: async (item) => (await prompt.ask(`Definición ${item.definitionRef}: [c]onfirmar [s]altar [q]salir `, true)) === "c",
         signal: options.signal,
-        onEvent: async (event) => { events.push(event); if (program.opts<GlobalOptions>().json) console.log(JSON.stringify(event)); else console.log(`[${event.type}] ${event.message}${event.nextAction ? ` Next: ${event.nextAction}` : ""}`); },
+        onEvent: async (event) => { events.push(event); if (stream) renderProgress(event, progress); },
       });
-      if (program.opts<GlobalOptions>().json) console.log(JSON.stringify({ type: "stop", at: new Date().toISOString(), message: `Loop stopped: ${result.stopReason}.`, stopReason: result.stopReason, nextAction: result.nextAction }));
-      else console.log(renderRun({ root: result.root, actions: result.actions.map((a) => ({ kind: "inbox", id: a.id, action: a.action, definitionRef: a.definitionRef, definitionKind: a.definitionKind })), features: result.features, stopReason: result.stopReason, nextAction: result.nextAction }));
+      const status = await repo.getStatus();
+      const includeEvents = result.stopReason !== "idle" && !stream && progress !== "off";
+      if (progress !== "ndjson") console.log(renderRun({ root: result.root, actions: result.actions.map((a) => ({ kind: "inbox", id: a.id, action: a.action, definitionRef: a.definitionRef, definitionKind: a.definitionKind })), features: result.features, stopReason: result.stopReason, nextAction: result.nextAction }, status, includeEvents));
     } finally { prompt.close(); }
   };
   await run();
@@ -484,9 +527,12 @@ function buildVerification(commands: string[], manualEvidence: string[]) {
 function renderTriage(result: TriageResult): string {
   return `Forgium triage\n  Actions: ${result.actions.length}${renderSpecActions(result.actions)}\n  Stop: ${result.stopReason}`;
 }
-function renderRun(result: RunResult): string {
-  const events = result.events?.length ? `\n\nEvents\n${result.events.map((event) => `  [${event.type}] ${event.message}${event.nextAction ? ` — Next: ${event.nextAction}` : ""}`).join("\n")}` : "";
-  return `Forgium run\n  Actions: ${result.actions.length}\n  Features: ${new Set(result.features.map((f) => f.id)).size}${renderSpecActions(result.actions)}\n  Stop: ${result.stopReason}${result.nextAction ? `\n  Next: ${result.nextAction}` : ""}${events}`;
+function renderRun(result: RunResult, status: Awaited<ReturnType<FilesystemForgiumRepository["getStatus"]>>, includeEvents = true): string {
+  const inboxNeedingAttention = (status.inbox.captured ?? 0) + (status.inbox.needs_clarification ?? 0) + (status.inbox.needs_definition ?? 0);
+  const workNeedingAttention = status.features.ready + status.features.doing + status.features.review + status.features.blocked;
+  const noActionRequired = inboxNeedingAttention === 0 && workNeedingAttention === 0;
+  const events = includeEvents && result.events?.length ? `\n\nEvents\n${result.events.map((event) => `  [${event.type}] ${event.message}${event.nextAction ? `\n    Next: ${event.nextAction}` : ""}`).join("\n")}` : "";
+  return `Forgium status after run\n\nInbox\n  captured: ${status.inbox.captured ?? 0}\n  awaiting clarification: ${status.inbox.needs_clarification ?? 0}\n  awaiting definition: ${status.inbox.needs_definition ?? 0}\n\nWork requiring attention\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}${noActionRequired ? "\n\n  No action required." : ""}${result.nextAction ? `\n\nNext: ${result.nextAction}` : ""}${events}`;
 }
 function renderSpecActions(actions: TriageAction[]): string {
   const definitions = actions.filter((action) => action.definitionRef).map((action) => `${action.definitionKind}: ${action.definitionRef}`);

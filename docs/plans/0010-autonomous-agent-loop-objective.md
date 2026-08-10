@@ -53,6 +53,7 @@ comando interno sigue ni coordinar agentes manualmente.
 ```text
 product/inbox (intención cruda)
   ├─ clasificación automática XS/S de bajo riesgo → features/ready/<id>
+  ├─ una respuesta directa → needs_clarification → clasificación
   └─ decisión humana requerida
        ├─ Spec → features/definition/<id>/spec.md
        └─ ADR  → features/definition/<id>/adr.md
@@ -88,7 +89,8 @@ type Classification = {
   confidence: number; // 0..1
   risks: Array<"public_api" | "persistence" | "security" | "external_integration" | "multi_package" | "unknown_impact">;
   rationale: string[];
-  proposed: { title: string; goal: string; acceptance: string[]; verification: VerificationPolicy };
+  proposed: { title: string; goal: string; acceptance: string[]; verification?: VerificationPolicy };
+  clarification?: { field: "output_path" | "verification" | "scope" };
 };
 ```
 
@@ -107,6 +109,16 @@ type Classification = {
 integración externa, multi-paquete o impacto desconocido, y `+3` por
 seguridad/autorización. El agente debe informar los factores; Forgium vuelve a
 calcular el puntaje y rechaza discrepancias.
+
+`auto_direct` debe incluir una política de verificación no vacía porque crea
+Work inmediatamente. `ask_direct` debe incluir `clarification` y puede omitir
+la verificación; `ask_spec`, `ask_adr` y `split` también pueden omitirla. En
+estos casos la política se exige al crear la Work desde una definición humana.
+
+Si la respuesta del clasificador no cumple su contrato, Forgium realiza un
+único intento de reparación sin persistir estado. Si vuelve a fallar, detiene
+el pass con `classification_failed`, deja el Inbox sin cambios y ofrece
+`triage` como recuperación manual. El comportamiento se define en ADR 0010.
 
 Un Inbox se promueve automáticamente solo si se cumplen todas estas reglas:
 

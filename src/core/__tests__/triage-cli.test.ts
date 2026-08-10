@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { FilesystemForgiumRepository } from "../../core/index.js";
 
 async function cli(root: string, ...args: string[]): Promise<{ stdout: string; stderr: string }> {
   const cliPath = path.resolve(process.cwd(), "src/cli/index.ts");
@@ -33,6 +34,19 @@ describe("forgium triage", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: "human_input_required" });
     const inbox = JSON.parse((await cli(root, "--json", "inbox")).stdout);
     expect(inbox).toMatchObject([{ status: "captured" }]);
+  });
+
+  it("records a pending Inbox clarification answer", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-clarification-cli-"));
+    await cli(root, "init");
+    await cli(root, "capture", "Create a Markdown file");
+    const repo = new FilesystemForgiumRepository(root);
+    const item = (await repo.listInbox())[0]!;
+    await repo.requestInboxClarification(item.id, "output_path");
+
+    const result = await cli(root, "--json", "inbox", "answer", item.id, "people.md");
+
+    expect(JSON.parse(result.stdout)).toMatchObject({ id: item.id, status: "captured", clarification: { field: "output_path", answer: "people.md" } });
   });
 
   it("classifies an Inbox item into a ready implementation Work in one CLI session", async () => {

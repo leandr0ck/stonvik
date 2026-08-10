@@ -13,8 +13,21 @@ export const ClassificationSchema = z.object({
     title: z.string().min(1),
     goal: z.string().min(1),
     acceptance: z.array(z.string().min(1)).min(1),
-    verification: VerificationPolicySchema,
+    verification: VerificationPolicySchema.optional(),
   }),
-}).strict();
+  clarification: z.object({
+    field: z.enum(["output_path", "verification", "scope"]),
+  }).optional(),
+}).strict().superRefine((classification, context) => {
+  if (classification.route === "auto_direct" && !classification.proposed.verification) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["proposed", "verification"], message: "Automatic classification requires a verification plan." });
+  }
+  if (classification.route === "ask_direct" && !classification.clarification) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["clarification"], message: "Direct clarification requires a clarification field." });
+  }
+  if (classification.route !== "ask_direct" && classification.clarification) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["clarification"], message: "Only direct clarification may include a clarification field." });
+  }
+});
 
 export type ClassificationPayload = z.infer<typeof ClassificationSchema>;

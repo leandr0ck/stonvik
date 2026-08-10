@@ -12,6 +12,7 @@ export * from "./execution/pi-classification-adapter.js";
 export * from "./execution/work-review-adapter.js";
 export * from "./services/classification.js";
 export * from "./services/agent-loop.js";
+export * from "./services/run-event-sink.js";
 export * from "./schemas/classification.schema.js";
 export * from "./schemas/definition.schema.js";
 export * from "./schemas/run-event.schema.js";

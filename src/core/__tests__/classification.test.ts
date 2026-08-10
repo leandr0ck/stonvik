@@ -10,6 +10,8 @@ describe("classificationPrompt", () => {
     expect(prompt).toContain('"rationale": ["reason"]');
     expect(prompt).toContain('"commands": [{ "name": "check", "run": "command" }]');
     expect(prompt).toContain('"requiredEvidence", if present, is an array of { "criterion": string, "kind": string } objects');
+    expect(prompt).toContain("auto_direct must include a non-empty proposed.verification");
+    expect(prompt).toContain('clarification: { field: "output_path" | "verification" | "scope" }');
     expect(prompt).toContain("Return the object itself, not a tool action or a description of work to do.");
     expect(prompt).toContain('REQUIRED LITERAL PATHS: ["names.md"]');
   });

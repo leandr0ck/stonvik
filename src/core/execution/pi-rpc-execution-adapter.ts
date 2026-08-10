@@ -2,13 +2,14 @@ import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import type { ExecutionProfile } from "../domain/types.js";
 import type { ExecutionAdapter, ExecutionRequest, ExecutionResult } from "./execution-adapter.js";
+import { reportAgentActivity, startHeartbeat } from "./execution-adapter.js";
 
 const RESULT_PATTERN = /FORGIUM_RESULT:\s*(completed|verification_failed|blocked|needs_human|cancelled)/i;
 
 export class PiRpcExecutionAdapter implements ExecutionAdapter {
   readonly id = "pi-rpc";
 
-  constructor(private readonly command = process.env.FORGIUM_PI_COMMAND ?? "pi", private readonly timeoutMs = 30 * 60 * 1000) {}
+  constructor(private readonly command = process.env.FORGIUM_PI_COMMAND ?? "pi", private readonly timeoutMs = 30 * 60 * 1000, private readonly heartbeatIntervalMs = 10_000) {}
 
   supports(profile: ExecutionProfile): boolean { return profile.kind === "direct"; }
 
@@ -28,10 +29,13 @@ export class PiRpcExecutionAdapter implements ExecutionAdapter {
     let settled = false;
 
     return new Promise((resolve, reject) => {
+      const stopHeartbeat = startHeartbeat(request.onProgress, "execution", `Pi en ${request.feature.id}`, this.heartbeatIntervalMs);
+      reportAgentActivity(request.onProgress, "execution", "Agente Pi iniciado.");
       const finish = (result: ExecutionResult) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        stopHeartbeat();
         request.signal?.removeEventListener("abort", abort);
         child.kill();
         resolve(result);
@@ -46,6 +50,8 @@ export class PiRpcExecutionAdapter implements ExecutionAdapter {
         let event: PiRpcEvent;
         try { event = JSON.parse(line) as PiRpcEvent; }
         catch { return; }
+        if (event.type === "tool_execution_start" || event.type === "tool_execution_end") reportAgentActivity(request.onProgress, "execution", "El agente completó una actividad permitida.");
+        if (event.type === "extension_ui_request") reportAgentActivity(request.onProgress, "execution", "El agente solicitó una interacción estructurada.");
         if (event.type === "message_end" && event.message?.role === "assistant") assistantText = assistantTextFrom(event.message.content);
         if (event.type === "agent_end") {
           const messages = event.messages ?? [];
@@ -65,13 +71,10 @@ export class PiRpcExecutionAdapter implements ExecutionAdapter {
         }
       });
       child.once("error", (error) => {
-        if (!settled) { clearTimeout(timeout); reject(error); }
+        if (!settled) { clearTimeout(timeout); stopHeartbeat(); reject(error); }
       });
       child.once("close", (code) => {
-        if (!settled) {
-          clearTimeout(timeout);
-          resolve(code === 0 ? parsePiResult(assistantText) : { outcome: "needs_human", summary: `Pi exited before producing a Forgium result (code ${code ?? "unknown"}).` });
-        }
+        if (!settled) finish(code === 0 ? parsePiResult(assistantText) : { outcome: "needs_human", summary: `Pi exited before producing a Forgium result (code ${code ?? "unknown"}).` });
       });
       request.signal?.addEventListener("abort", abort, { once: true });
       child.stdin.write(`${JSON.stringify({ id: request.runId, type: "prompt", message: buildPiPrompt(request) })}\n`);

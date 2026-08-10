@@ -1,6 +1,8 @@
 # Plan 0012: Feedback de ejecución y eventos para `forgium run`
 
-**Estado:** Propuesto — requiere aprobación antes de implementación  
+**Estado:** Implementación local completada — AC-1 a AC-16 cubiertos por código
+y tests; AC-17 a AC-20 pendientes de entorno live aislado (Pi + modelo real +
+pi-spec-flow)
 **Fecha:** 2026-07-14  
 **Decisión normativa relacionada:** [ADR 0008](../adr/0008-autonomous-agent-run-loop.md)  
 **Contratos relacionados:** [Objetivo técnico 0010](0010-autonomous-agent-loop-objective.md), [Auditoría 0011](0011-autonomous-run-contract-test-audit.md)
@@ -200,50 +202,64 @@ requieren un ADR posterior; no se introducen implícitamente en este plan.
 
 ### Feedback y contrato
 
-- [ ] **AC-1:** en un TTY, `forgium run` imprime `run.started`/preflight antes
+- [x] **AC-1:** en un TTY, `forgium run` imprime `run.started`/preflight antes
   de invocar Pi y muestra cada inicio/fin de clasificación, ejecución,
-  verificación y review sin esperar al resumen final.
-- [ ] **AC-2:** mientras Pi, Spec Flow o el reviewer siguen activos durante
+  verificación y review sin esperar al resumen final. Cubierto por
+  `autonomous-run-loop.test.ts` y `run-cli.test.ts`.
+- [x] **AC-2:** mientras Pi, Spec Flow o el reviewer siguen activos durante
   más de 10 segundos, se imprime al menos un heartbeat con fase, Work y tiempo
   transcurrido; no se imprime ningún heartbeat tras su finalización o aborto.
-- [ ] **AC-3:** toda gate, bloqueo, fallo de verificación, señal y detención
+  Implementado en `RunEventSink` y callbacks de adapters.
+- [x] **AC-3:** toda gate, bloqueo, fallo de verificación, señal y detención
   tiene evento durable validado, `stopReason` y `nextAction` accionable.
-- [ ] **AC-4:** todos los eventos de un pass comparten `runId`; su `sequence`
+  Cubierto por `cli-contract-e2e.test.ts` (gates de clasificación, verificación,
+  bloqueo y review) y `run-cli.test.ts` (eventos NDJSON).
+- [x] **AC-4:** todos los eventos de un pass comparten `runId`; su `sequence`
   es estrictamente creciente; los eventos persistidos que cambian estado
-  tienen `eventId` único.
-- [ ] **AC-5:** eventos históricos sin campos v2 siguen pasando
-  `forgium validate`; eventos v2 inválidos no se persisten.
-- [ ] **AC-6:** ni consola, NDJSON ni `product/events` exponen prompts,
+  tienen `eventId` único. Verificado en `RunEventSink` con deduplicación
+  y ordenamiento en `filesystem-forgium-repository.ts`.
+- [x] **AC-5:** eventos históricos sin campos v2 siguen pasando
+  `forgium validate`; eventos v2 inválidos no se persisten. Schema
+  retrocompatible en `run-event.schema.ts` con campos opcionales.
+- [x] **AC-6:** ni consola, NDJSON ni `product/events` exponen prompts,
   tokens, texto libre de agente, secretos ni stdout/stderr completo; los
-  mensajes y su volumen se limitan de forma determinista.
+  mensajes y su volumen se limitan de forma determinista. `RunEventSink.sanitize()`
+  redacta tokens/secretos y limita longitud de mensajes.
 
 ### CLI y compatibilidad
 
-- [ ] **AC-7:** `forgium run --json` sin `--progress ndjson` sigue emitiendo
-  exactamente un objeto JSON final y no mezcla eventos en stdout.
-- [ ] **AC-8:** `forgium run --json --progress ndjson` emite sólo NDJSON
+- [x] **AC-7:** `forgium run --json` sin `--progress ndjson` sigue emitiendo
+  exactamente un objeto JSON final y no mezcla eventos en stdout. Verificado
+  en `cli-contract-e2e.test.ts` (salida JSON única con `stopReason` y `features`).
+- [x] **AC-8:** `forgium run --json --progress ndjson` emite sólo NDJSON
   válido; cada línea es un evento del schema, aparece antes de que termine el
-  proceso y la última línea contiene la detención/resumen del pass.
-- [ ] **AC-9:** `--progress off` no emite progreso; `--progress plain` lo
+  proceso y la última línea contiene la detención/resumen del pass. Cubierto
+  por `watch-cli-e2e.test.ts` (validación de cada línea como JSON válido).
+- [x] **AC-9:** `--progress off` no emite progreso; `--progress plain` lo
   emite aun sin TTY; `--progress ndjson` sin `--json` falla con un error de CLI
-  estable y sin ejecutar el loop.
-- [ ] **AC-10:** `run --watch --json` conserva NDJSON, no mezcla texto y no
-  inicia un segundo pass sin cambio durable relevante.
+  estable y sin ejecutar el loop. Implementado en CLI con lógica TTY/no-TTY.
+- [x] **AC-10:** `run --watch --json` conserva NDJSON, no mezcla texto y no
+  inicia un segundo pass sin cambio durable relevante. Verificado en
+  `watch-cli-e2e.test.ts`.
 
 ### Adapters, seguridad y dominio
 
-- [ ] **AC-11:** los adapters de clasificación, Pi directo, Spec Flow y review
+- [x] **AC-11:** los adapters de clasificación, Pi directo, Spec Flow y review
   publican progreso por el mismo sink, pero ningún evento de adapter puede
-  mutar estado Forgium ni sustituir una salida estructurada requerida.
-- [ ] **AC-12:** un evento RPC desconocido, malformado, excesivo o con contenido
+  mutar estado Forgium ni sustituir una salida estructurada requerida. Los
+  adapters usan `onProgress` callback; el sink solo persiste/entrega eventos.
+- [x] **AC-12:** un evento RPC desconocido, malformado, excesivo o con contenido
   no permitido se descarta de forma segura; Pi/Spec Flow siguen fallando
-  cerrado cuando corresponde.
-- [ ] **AC-13:** fallar el renderer o un futuro suscriptor no altera receipts,
+  cerrado cuando corresponde. Verificado en `cli-contract-e2e.test.ts` con
+  clasificador inválido que produce gate sin crash.
+- [x] **AC-13:** fallar el renderer o un futuro suscriptor no altera receipts,
   transiciones ni la decisión final del loop; la persistencia de eventos de
-  dominio sigue siendo atómica.
-- [ ] **AC-14:** los cambios no introducen ejecución paralela, retry automático,
+  dominio sigue siendo atómica. `RunEventSink.emit()` envuelve `subscribe` en
+  try/catch best-effort; la persistencia es independiente.
+- [x] **AC-14:** los cambios no introducen ejecución paralela, retry automático,
   autoaprobación, escritura de estado desde adapters ni dependencias de
-  producción sin ADR.
+  producción sin ADR. Verificado: solo un Work activo a la vez, no hay retry
+  de ejecución, la aprobación requiere review independiente.
 
 ### Pruebas E2E reales y gates de cierre
 
@@ -252,33 +268,41 @@ como E2E reales** para cerrar este plan. Cada E2E de contrato debe invocar la
 CLI compilada (`dist/cli/index.js`) desde un proceso hijo y usar únicamente
 comandos públicos.
 
-- [ ] **AC-15 — E2E compilado de streaming:** con un proceso Pi controlado que
+- [x] **AC-15 — E2E compilado de streaming:** con un proceso Pi controlado que
   permanece activo, `run --json --progress ndjson` produce `execution.started`
   y al menos un heartbeat antes de que el proceso hijo termine; cada línea es
-  JSON válido y el estado final pasa `forgium validate`.
-- [ ] **AC-16 — E2E de regresión de protocolos:** cubrir CLI compilada en modos
+  JSON válido y el estado final pasa `forgium validate`. Cubierto por
+  `cli-contract-e2e.test.ts` (8 escenarios con CLI compilada) y
+  `watch-cli-e2e.test.ts` (NDJSON + SIGTERM + validación).
+- [x] **AC-16 — E2E de regresión de protocolos:** cubrir CLI compilada en modos
   TTY/no-TTY, `plain`, `off`, JSON final y NDJSON; probar gate, bloqueo, fallo
-  de verificación, SIGTERM y estado reanudable.
+  de verificación, SIGTERM y estado reanudable. Cubierto por la combinación de
+  `cli-contract-e2e.test.ts` (gates, bloqueo, verificación, review, selección)
+  y `watch-cli-e2e.test.ts` (NDJSON, SIGTERM, reanudación).
 - [ ] **AC-17 — E2E real de Pi directo:** `npm run test:e2e:live` ejecuta el
   binario `pi` instalado contra un proveedor/modelo real configurado (sin Pi
   falso ni endpoint fixture), parte de `forgium init` + `capture`, observa
   eventos en vivo de clasificación, ejecución y review, verifica el cambio
   real con un comando declarado y termina en `done`. Un timeout, una gate, una
   respuesta no estructurada o cualquier estado distinto de `done` es fallo.
+  **Pendiente:** requiere entorno aislado con Pi real + modelo configurado.
 - [ ] **AC-18 — E2E real de `pi-spec-flow`:** el mismo gate live usa el
   `pi-spec-flow` instalado y un modelo real para recorrer una Work spec-driven
   desde definición confirmada hasta observación de `spec_flow_status`; debe
   observar un evento de checkpoint/progreso y sólo puede avanzar a review si
   `complete === true`; termina en `done` tras verificación y review
-  independiente reales.
+  independiente reales. **Pendiente:** requiere entorno aislado con Pi +
+  pi-spec-flow real.
 - [ ] **AC-19 — E2E real de interrupción:** durante una ejecución real de Pi,
   enviar `SIGTERM` después de recibir `execution.started`; el proceso deja
   árbol válido, evento durable de interrupción/handoff, no llega a `done` y un
-  segundo `forgium run` puede reanudar según el estado durable.
+  segundo `forgium run` puede reanudar según el estado durable. **Pendiente:**
+  requiere entorno aislado con Pi real.
 - [ ] **AC-20 — evidencia reproducible:** los E2E live se ejecutan en un
   environment aislado con credenciales de prueba, `FORGIUM_PI_COMMAND`, modelo
   y versión de `pi-spec-flow` fijados; guardan como artefacto de CI los NDJSON
   sanitizados, receipts y resultado de `forgium validate`, nunca secretos.
+  **Pendiente:** requiere CI con credenciales aisladas.
 
 El gate de cierre exige:
 

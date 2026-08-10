@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import type { ExecutionRequest, ExecutionResult } from "./execution-adapter.js";
+import { reportAgentActivity, startHeartbeat } from "./execution-adapter.js";
 import type { Feature, WorkReviewDecision } from "../domain/types.js";
 import { WorkReviewDecisionSchema } from "../schemas/work-review.schema.js";
 
@@ -11,6 +12,7 @@ export interface WorkReviewRequest {
   receipts: unknown[];
   verification: unknown[];
   signal?: AbortSignal;
+  onProgress?: import("./execution-adapter.js").AdapterProgressCallback;
 }
 
 export interface WorkReviewAdapter {
@@ -22,7 +24,7 @@ const RESULT = /FORGIUM_REVIEW:\s*([\s\S]+)/i;
 
 export class PiWorkReviewAdapter implements WorkReviewAdapter {
   readonly id = "pi-review";
-  constructor(private readonly command = process.env.FORGIUM_PI_COMMAND ?? "pi", private readonly timeoutMs = 120_000) {}
+  constructor(private readonly command = process.env.FORGIUM_PI_COMMAND ?? "pi", private readonly timeoutMs = 120_000, private readonly heartbeatIntervalMs = 10_000) {}
 
   async review(request: WorkReviewRequest): Promise<WorkReviewDecision> {
     const child = spawn(this.command, ["--mode", "rpc", "--no-session"], { cwd: request.root, stdio: ["pipe", "pipe", "pipe"] });
@@ -31,10 +33,13 @@ export class PiWorkReviewAdapter implements WorkReviewAdapter {
     const decoder = new StringDecoder("utf8");
     return new Promise((resolve, reject) => {
       let settled = false;
+      const stopHeartbeat = startHeartbeat(request.onProgress, "review", `Review de ${request.feature.id}`, this.heartbeatIntervalMs);
+      reportAgentActivity(request.onProgress, "review", "Reviewer independiente iniciado.");
       const finish = (result: WorkReviewDecision | Error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        stopHeartbeat();
         request.signal?.removeEventListener("abort", abort);
         child.kill();
         result instanceof Error ? reject(result) : resolve(result);
@@ -44,6 +49,7 @@ export class PiWorkReviewAdapter implements WorkReviewAdapter {
       const handle = (raw: string) => {
         try {
           const event = JSON.parse(raw) as { type?: string; message?: { role?: string; content?: unknown }; messages?: Array<{ role?: string; content?: unknown }> };
+          if (event.type === "tool_execution_start" || event.type === "tool_execution_end") reportAgentActivity(request.onProgress, "review", "El reviewer completó una actividad permitida.");
           if (event.type === "message_end" && event.message?.role === "assistant") assistant = textOf(event.message.content);
           if (event.type === "agent_end") {
             const last = [...(event.messages ?? [])].reverse().find((message) => message.role === "assistant");

@@ -2,14 +2,23 @@ export type FeatureState = "ready" | "doing" | "review" | "blocked" | "done";
 
 export const FEATURE_STATES: FeatureState[] = ["ready", "doing", "review", "blocked", "done"];
 
+export type InboxStatus = "captured" | "needs_clarification" | "needs_definition" | "promoted" | "merged" | "deferred" | "rejected";
+export type ClarificationField = "output_path" | "verification" | "scope";
+
+export interface InboxClarification {
+  field: ClarificationField;
+  answer?: string;
+}
+
 export interface InboxItem {
   id: string;
   source: string;
   created: string;
-  status: "captured" | "needs_definition" | "promoted" | "merged" | "deferred" | "rejected";
+  status: InboxStatus;
   title: string;
   body?: string;
   path: string;
+  clarification?: InboxClarification;
   definitionRef?: string;
   definitionKind?: "spec" | "adr";
   featureRef?: string;
@@ -32,8 +41,9 @@ export interface Classification {
     title: string;
     goal: string;
     acceptance: string[];
-    verification: VerificationPolicy;
+    verification?: VerificationPolicy;
   };
+  clarification?: { field: ClarificationField };
 }
 
 export interface FeatureManifest {
@@ -197,12 +207,24 @@ export interface WorkReviewDecision {
   evidence: string[];
 }
 
+export type RunEventPhase = "preflight" | "classification" | "definition" | "execution" | "verification" | "review";
+export type RunEventSeverity = "info" | "warning" | "error";
+
 export interface RunEvent {
+  schemaVersion?: 2;
+  eventId?: string;
+  runId?: string;
+  sequence?: number;
   at: string;
   type: "status" | "classification" | "transition" | "receipt" | "gate" | "stop";
+  kind?: string;
+  phase?: RunEventPhase;
+  severity?: RunEventSeverity;
   workId?: string;
   inboxId?: string;
   state?: string;
   message: string;
   nextAction?: string;
+  stopReason?: string;
+  elapsedMs?: number;
 }

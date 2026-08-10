@@ -49,6 +49,21 @@ describe("forgium run", () => {
     await expect(repo.listInbox()).resolves.toMatchObject([{ status: "captured" }]);
   });
 
+  it("renders current actionable state instead of internal run counters", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-run-idle-status-"));
+    const repo = new FilesystemForgiumRepository(root);
+    await repo.init();
+
+    const result = await runCli(root, ["run"]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Forgium status after run");
+    expect(result.stdout).toContain("captured: 0");
+    expect(result.stdout).toContain("No action required.");
+    expect(result.stdout).not.toContain("Actions:");
+    expect(result.stdout).not.toContain("Features:");
+  });
+
   it("reports ready Work without starting implementation", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-run-ready-test-"));
     const repo = new FilesystemForgiumRepository(root);
@@ -98,24 +113,39 @@ describe("forgium run", () => {
     expect((await runCli(root, ["init", "--json"])).code).toBe(0);
     expect((await runCli(root, ["capture", "Create a names file", "--json"])).code).toBe(0);
     const fakePi = await fakePiWithClassification(root, {
-      route: "direct",
-      size: "xs",
-      rationale: "One small file.",
-      proposed: { verification: { commands: ["true"] } },
+      route: "auto_direct",
+      size: "XS",
+      estimatedTouchedFiles: 1,
+      complexityScore: 1,
+      confidence: 0.95,
+      risks: [],
+      rationale: ["One small file."],
+      proposed: {
+        title: "Create a names file",
+        goal: "Create a file with names.",
+        acceptance: ["A names file exists."],
+        verification: { commands: [], requiredEvidence: [] },
+      },
     });
 
     const result = await runCli(root, ["run"], "", { ...process.env, FORGIUM_PI_COMMAND: fakePi });
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Stop: human_input_required");
-    expect(result.stdout).toContain("Next: Review and classify Inbox item inbox-");
+    expect(result.stdout).toContain("Forgium status after run");
+    expect(result.stdout).toContain("captured: 1");
+    expect(result.stdout).toContain("Forgium could not create a complete Work proposal after one automatic repair attempt. Your Inbox is unchanged.");
+    expect(result.stdout).toContain("Next: Run `forgium triage` to create the Work manually. Your Inbox has not been changed.");
     expect(result.stdout).not.toContain("Definition required:");
     const inbox = JSON.parse((await runCli(root, ["inbox", "--json"])).stdout);
     expect(inbox).toMatchObject([{ status: "captured" }]);
     const events = (await fs.readFile(path.join(root, "product", "events", `${new Date().toISOString().slice(0, 10)}.ndjson`), "utf8"))
       .trim().split("\n").map((line) => JSON.parse(line));
     expect(events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "gate", message: expect.stringContaining("Classification needs human attention"), nextAction: expect.stringContaining("Review and classify Inbox item") }),
+      expect.objectContaining({
+        type: "gate",
+        message: expect.stringContaining("Forgium could not create a complete Work proposal after one automatic repair attempt."),
+        nextAction: expect.stringContaining("Run `forgium triage` to create the Work manually"),
+      }),
     ]));
   }, 15_000);
 

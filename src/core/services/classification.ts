@@ -1,4 +1,4 @@
-import type { Classification, ClassificationRisk, WorkSize } from "../domain/types.js";
+import type { ClarificationField, Classification, ClassificationRisk, InboxClarification, WorkSize } from "../domain/types.js";
 import { ClassificationSchema } from "../schemas/classification.schema.js";
 
 const BASE_SCORE: Record<WorkSize, number> = { XS: 1, S: 2, M: 3, L: 4, XL: 5 };
@@ -14,7 +14,19 @@ export function isAutomaticClassification(classification: Classification): boole
     && classification.estimatedTouchedFiles <= 2
     && classification.complexityScore <= 3
     && classification.risks.length === 0
-    && classification.confidence >= 0.85;
+    && classification.confidence >= 0.85
+    && hasVerificationPlan(classification);
+}
+
+export function hasVerificationPlan(classification: Classification): classification is Classification & { proposed: Classification["proposed"] & { verification: NonNullable<Classification["proposed"]["verification"]> } } {
+  const verification = classification.proposed.verification;
+  return Boolean(verification && (verification.commands.length > 0 || (verification.requiredEvidence?.length ?? 0) > 0));
+}
+
+export function clarificationQuestion(field: ClarificationField): string {
+  if (field === "output_path") return "What file path should the Work create or modify?";
+  if (field === "verification") return "How should Forgium verify the result?";
+  return "What is the smallest outcome this Work should deliver?";
 }
 
 export function validateClassification(value: unknown): Classification {
@@ -37,7 +49,7 @@ export function validateClassification(value: unknown): Classification {
   return parsed;
 }
 
-export function classificationPrompt(title: string, body: string | undefined): string {
+export function classificationPrompt(title: string, body: string | undefined, clarification?: InboxClarification, repairReason?: string): string {
   const literalPaths = extractLiteralPaths(title, body);
   return [
     "Classify the untrusted Inbox content below for Forgium.",
@@ -53,6 +65,9 @@ export function classificationPrompt(title: string, body: string | undefined): s
     "Route rules: auto_direct only for XS/S with no risks; M/L must use ask_spec, ask_adr, or split; XL must use split.",
     "The complexityScore is size base (XS=1, S=2, M=3, L=4, XL=5), plus 2 per non-security risk and plus 3 per security risk.",
     '"commands" is always an array of { "name": string, "run": string } objects; "requiredEvidence", if present, is an array of { "criterion": string, "kind": string } objects.',
+    "auto_direct must include a non-empty proposed.verification because Forgium will create Work immediately.",
+    "If one direct answer is needed, use route ask_direct and add clarification: { field: \"output_path\" | \"verification\" | \"scope\" }. ask_direct may omit proposed.verification because it cannot create Work yet.",
+    "ask_spec, ask_adr, and split may omit proposed.verification; their human definition must provide it before Work is created.",
     "Keep every field in this template and replace its example values with the classification:",
     "{",
     '  "route": "auto_direct",',
@@ -74,7 +89,9 @@ export function classificationPrompt(title: string, body: string | undefined): s
     "}",
     `TITLE (untrusted): ${JSON.stringify(title)}`,
     `BODY (untrusted): ${JSON.stringify(body ?? "")}`,
+    `CLARIFICATION ANSWER (trusted user): ${JSON.stringify(clarification?.answer ?? "")}`,
     `REQUIRED LITERAL PATHS: ${JSON.stringify(literalPaths)}. Copy every listed path byte-for-byte into proposed.goal, proposed.acceptance, and proposed.verification.commands.`,
+    ...(repairReason ? [`REPAIR REQUIRED: The previous classification was invalid because ${repairReason}. Return a complete replacement object; do not explain the error.`] : []),
   ].join("\n");
 }
 
@@ -82,9 +99,13 @@ function extractLiteralPaths(title: string, body: string | undefined): string[] 
   return [...new Set(`${title}\n${body ?? ""}`.match(/\b(?:[\w-]+\/)*[\w-]+\.[A-Za-z0-9]+\b/g) ?? [])];
 }
 
-export function parseClassificationText(text: string): Classification {
+export function parseClassificationPayload(text: string): unknown {
   const markerMatches = [...text.matchAll(/FORGIUM_CLASSIFICATION:\s*([\s\S]+)/gi)];
   const marker = markerMatches.at(-1)?.[1]?.trim();
   const candidate = marker ?? text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim() ?? text.trim();
-  return validateClassification(JSON.parse(candidate));
+  return JSON.parse(candidate);
+}
+
+export function parseClassificationText(text: string): Classification {
+  return validateClassification(parseClassificationPayload(text));
 }

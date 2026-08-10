@@ -11,6 +11,7 @@
 - [ADR 0007 — Loop de implementación por observación](adr/0007-implementation-observation-loop.md)
 - [ADR 0008 — `forgium run` como loop autónomo de agentes](adr/0008-autonomous-agent-run-loop.md)
 - [ADR 0009 — Procedencia de Inbox junto a Work](adr/0009-inbox-provenance-with-work.md)
+- [ADR 0010 — Reparación y clarificación de clasificación](adr/0010-classification-repair-and-clarification.md)
 
 ## Planes
 
@@ -41,6 +42,10 @@ verde no implica que el recorrido autónomo completo esté cubierto.
   ejecución, verificación y review. La clasificación inválida tiene una
   regresión de CLI y el contrato autónomo offline se ejerce mediante la CLI
   compilada con un Pi RPC falso.
+- `forgium run` publica eventos v2 validados, correlacionados por `runId` y
+  secuencia; el stream NDJSON y el renderer humano comparten el mismo sink.
+  Los heartbeats y la actividad RPC son efímeros salvo el primer heartbeat;
+  nunca se expone stdout, prompts ni tokens del agente.
 - Los adapters `pi` y `pi-spec-flow` se seleccionan automáticamente según el
   perfil de la Work; `forgium run` sigue siendo la interfaz principal.
 - La integración spec-driven requiere `pi-spec-flow >= 0.4.8` y fue validada

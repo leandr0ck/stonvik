@@ -47,6 +47,17 @@ describe("FilesystemForgiumRepository", () => {
     expect(inbox[0]?.body).toContain("configured number");
   });
 
+  it("persists a typed clarification answer without changing raw Inbox intent", async () => {
+    const { repo } = await tempRepo();
+    const inbox = await repo.capture({ text: "Create a Markdown file" });
+    const pending = await repo.requestInboxClarification(inbox.id, "output_path");
+    expect(pending).toMatchObject({ status: "needs_clarification", clarification: { field: "output_path" } });
+
+    const answered = await repo.answerInboxClarification(inbox.id, "people.md");
+    expect(answered).toMatchObject({ status: "captured", clarification: { field: "output_path", answer: "people.md" }, title: "Create a Markdown file" });
+    await expect(repo.validate()).resolves.toMatchObject({ valid: true });
+  });
+
   it("creates features and transitions through the default lifecycle", async () => {
     const { root, repo } = await tempRepo();
     const feature = await repo.createFeature({ title: "Add WhatsApp Button", goal: "Add a storefront contact button.", acceptance: ["Button is visible"], verification: { commands: [{ name: "pass", run: "true" }] } });

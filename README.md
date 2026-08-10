@@ -40,7 +40,9 @@ forgium capture "Add a WhatsApp contact button to the storefront"
 #    independently reviews eligible Work.
 forgium run
 
-# 4. If Forgium asks for a Spec/ADR, complete the document and run again.
+# 4. If Forgium asks one direct question, answer it in the terminal. In a
+#    non-interactive environment, use: forgium inbox answer <inbox-id> <answer>
+#    then run Forgium again. If it asks for a Spec/ADR, complete the document.
 # 5. Inspect progress; Forgium never self-approves.
 forgium status --verbose
 ```
@@ -93,7 +95,9 @@ raw request
 
 - `forgium run` is the normal end-to-end path; `triage`, `implement`, and
   `review` remain manual recovery APIs.
-- There is no automatic approval, retry, or transition from `doing` to `done`.
+- There is no automatic approval or transition from `doing` to `done`. Forgium
+  makes at most one in-memory repair attempt for an invalid classifier
+  response; it never retries persisted Work execution, verification, or review.
 - Work transitions move the complete directory; individual Spec Flow
   tickets remain owned by `pi-spec-flow`.
 - Receipts and repository artifacts are durable; leases and process logs under
@@ -219,8 +223,18 @@ action. If Pi does not return structured status, Forgium fails closed: Work
 remains `doing` with a durable handoff receipt.
 
 Use `forgium run --watch` to keep a local process waiting for durable Inbox,
-definition, manifest, ticket, or receipt changes. With `--json --watch`, output
-is newline-delimited JSON only.
+definition, manifest, ticket, or receipt changes. Run progress is sourced from
+validated domain events, never raw Pi output:
+
+```bash
+forgium run --progress plain       # force compact live feedback
+forgium run --progress off         # suppress live feedback
+forgium run --json --progress ndjson # one validated RunEvent per line
+```
+
+`auto` is the default: it streams only to a TTY. `--json` without
+`--progress ndjson` remains one final JSON object. With `--json --watch`, output
+is newline-delimited JSON only and every pass ends in `run.stopped`.
 
 ### 4. Review, complete, or unblock
 
@@ -261,7 +275,7 @@ A completed Work cannot be moved to another state through the CLI.
 | `forgium capture [text...]` | Save a raw Inbox item. Reads piped standard input when no text is supplied. |
 | `forgium inbox` | List Inbox items. |
 | `forgium triage [--non-interactive] [--dry-run]` | Interview and classify captured Inbox items. |
-| `forgium run [--watch] [--non-interactive] [--dry-run]` | Run the autonomous product, implementation, verification, and review loop. |
+| `forgium run [--watch] [--non-interactive] [--dry-run] [--progress <auto\|off\|plain\|ndjson>]` | Run the autonomous loop with validated live feedback. `ndjson` requires `--json`. |
 | `forgium status [--verbose]` | Show state counts; verbose includes implementation observations. |
 | `forgium validate` | Validate required directories and Inbox/Work schemas. Returns exit code `2` when invalid. |
 | `forgium work create ...` | Create ready Work; verification command or manual evidence is required. |

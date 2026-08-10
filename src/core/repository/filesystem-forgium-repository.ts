@@ -5,7 +5,7 @@ import os from "node:os";
 import { exec as execCallback } from "node:child_process";
 import { promisify } from "node:util";
 import YAML from "yaml";
-import type { CaptureInput, Classification, CreateFeatureInput, ExecutionProfile, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, RunEvent, ValidationReport, VerificationReceipt } from "../domain/types.js";
+import type { CaptureInput, ClarificationField, Classification, CreateFeatureInput, ExecutionProfile, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, RunEvent, ValidationReport, VerificationReceipt } from "../domain/types.js";
 import { FEATURE_STATES } from "../domain/types.js";
 import { FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, ForgiumNotInitializedError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, LoopAlreadyRunningError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError } from "../errors/forgium-errors.js";
 import { InboxFrontmatterSchema } from "../schemas/inbox.schema.js";
@@ -25,6 +25,7 @@ import { ExecutionAdapterRegistry } from "../execution/execution-adapter.js";
 const exec = promisify(execCallback);
 const DEFAULT_CHECK_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_SUMMARY_LENGTH = 2_000;
+type RepositoryEventCallback = (event: Omit<RunEvent, "at">, options?: { durable?: boolean }) => Promise<void> | void;
 
 export class FilesystemForgiumRepository {
   private readonly paths;
@@ -66,6 +67,12 @@ export class FilesystemForgiumRepository {
     await fs.mkdir(this.paths.events, { recursive: true });
     const eventPath = path.join(this.paths.events, `${event.at.slice(0, 10)}.ndjson`);
     const current = await fs.readFile(eventPath, "utf8").catch(() => "");
+    if (event.schemaVersion === 2) {
+      const existing = current.split(/\r?\n/).filter(Boolean).map((line) => RunEventSchema.parse(JSON.parse(line)) as RunEvent);
+      if (existing.some((candidate) => candidate.schemaVersion === 2 && candidate.eventId === event.eventId)) throw new Error(`Duplicate run event ID: ${event.eventId}`);
+      const lastSequence = existing.filter((candidate) => candidate.schemaVersion === 2 && candidate.runId === event.runId).map((candidate) => candidate.sequence ?? 0).at(-1) ?? 0;
+      if ((event.sequence ?? 0) <= lastSequence) throw new Error(`Run event sequence is not increasing for ${event.runId}.`);
+    }
     await this.writeFileAtomic(eventPath, `${current}${JSON.stringify(event)}\n`);
   }
 
@@ -105,6 +112,23 @@ export class FilesystemForgiumRepository {
     const deferred = { ...item, status: "deferred" as const };
     await this.writeInboxItem(deferred);
     return deferred;
+  }
+
+  async requestInboxClarification(id: string, field: ClarificationField): Promise<InboxItem> {
+    const item = await this.requireInbox(id);
+    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
+    const pending = { ...item, status: "needs_clarification" as const, clarification: { field } };
+    await this.writeInboxItem(pending);
+    return pending;
+  }
+
+  async answerInboxClarification(id: string, answer: string): Promise<InboxItem> {
+    const item = await this.requireInbox(id);
+    const normalized = answer.trim();
+    if (item.status !== "needs_clarification" || !item.clarification || !normalized) throw new InvalidInboxItemError(`Inbox item does not have a pending clarification: ${id}`);
+    const answered = { ...item, status: "captured" as const, clarification: { ...item.clarification, answer: normalized } };
+    await this.writeInboxItem(answered);
+    return answered;
   }
 
   async rejectInbox(id: string): Promise<InboxItem> {
@@ -207,7 +231,10 @@ export class FilesystemForgiumRepository {
     await fs.mkdir(this.paths.inboxReceipts, { recursive: true });
     const receipt = { schemaVersion: 1 as const, kind: "classification" as const, inboxId: current.id, runId, created: isoNow(), outcome: "classified" as const, classification: parsed.data };
     ClassificationReceiptSchema.parse(receipt);
-    await this.writeFileAtomic(path.join(this.paths.inboxReceipts, `${item.id}-${runId}.yaml`), YAML.stringify(receipt));
+    const baseName = `${item.id}-${runId}`;
+    const preferredPath = path.join(this.paths.inboxReceipts, `${baseName}.yaml`);
+    const receiptPath = await exists(preferredPath) ? path.join(this.paths.inboxReceipts, `${baseName}-${shortId()}.yaml`) : preferredPath;
+    await this.writeFileAtomic(receiptPath, YAML.stringify(receipt));
   }
 
   async createFeatureFromInbox(inboxId: string, input: Omit<CreateFeatureInput, "source">): Promise<Feature> {
@@ -256,8 +283,9 @@ export class FilesystemForgiumRepository {
     return receipts.sort((a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
   }
 
-  async verifyFeature(id: string, options: { evidence?: ReceiptEvidence[]; runId?: string } = {}): Promise<VerificationReceipt> {
+  async verifyFeature(id: string, options: { evidence?: ReceiptEvidence[]; runId?: string; onEvent?: RepositoryEventCallback } = {}): Promise<VerificationReceipt> {
     const feature = await this.requireFeature(id);
+    await options.onEvent?.({ type: "status", kind: "verification.started", phase: "verification", workId: feature.id, message: `Verification started for ${feature.id}.` });
     if (feature.state !== "doing") throw new InvalidStateTransitionError(feature.state, "review");
     const runId = options.runId ?? `run-${timestampForFile()}-${shortId()}`;
     const policy = feature.manifest.verification;
@@ -271,9 +299,11 @@ export class FilesystemForgiumRepository {
         try {
           const result = await exec(command.run, { cwd: this.root, timeout: command.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024 });
           checks.push({ name: command.name, command: command.run, cwd: ".", exitCode: 0, durationMs: Date.now() - started, status: "passed", outputSummary: redactOutput(`${result.stdout}${result.stderr}`) });
+          await options.onEvent?.({ type: "status", kind: "verification.check.finished", phase: "verification", workId: feature.id, message: `Verification check ${command.name} passed.`, elapsedMs: Date.now() - started });
         } catch (error) {
           const commandError = error as { code?: number | string; killed?: boolean; stdout?: string; stderr?: string };
           checks.push({ name: command.name, command: command.run, cwd: ".", exitCode: typeof commandError.code === "number" ? commandError.code : null, durationMs: Date.now() - started, status: commandError.killed ? "cancelled" : "failed", outputSummary: redactOutput(`${commandError.stdout ?? ""}${commandError.stderr ?? ""}`) });
+          await options.onEvent?.({ type: "status", kind: "verification.check.finished", phase: "verification", severity: commandError.killed ? "warning" : "error", workId: feature.id, message: `Verification check ${command.name} ${commandError.killed ? "was cancelled" : "failed"}.`, elapsedMs: Date.now() - started });
         }
       }
       evidence = policy.requiredEvidence?.map((required) => options.evidence?.find((candidate) => candidate.criterion === required.criterion && candidate.kind === required.kind) ?? { ...required, status: "pending" as const });
@@ -284,6 +314,7 @@ export class FilesystemForgiumRepository {
     }
 
     const receipt = this.createVerificationReceipt(feature, runId, outcome, checks, evidence);
+    await options.onEvent?.({ type: outcome === "passed" ? "receipt" : "gate", kind: "verification.finished", phase: "verification", severity: outcome === "passed" ? "info" : "error", workId: feature.id, message: `Verification finished with outcome ${outcome}.`, nextAction: outcome === "passed" ? "Continue to independent review." : "Inspect verification evidence before retrying." });
     await this.persistReceipt(feature, receipt);
     if (outcome === "failed" || outcome === "cancelled" || outcome === "manual_required") {
       await this.persistReceipt(feature, this.createHandoffReceipt(feature, runId, outcome === "cancelled" ? "cancelled" : "failed", receipt.id, receipt.summary));
@@ -293,36 +324,50 @@ export class FilesystemForgiumRepository {
     return receipt;
   }
 
-  async reviewFeature(id: string, decision: ReviewDecision, summary: string, actorName = "forgium", findings?: string[]): Promise<Feature> {
+  async reviewFeature(id: string, decision: ReviewDecision, summary: string, actorName = "forgium", findings?: string[], runId?: string): Promise<Feature> {
     const feature = await this.requireFeature(id);
     if (feature.state !== "review") throw new InvalidStateTransitionError(feature.state, "review");
-    await this.persistReceipt(feature, this.createReviewReceipt(feature, decision, summary, actorName, findings));
+    await this.persistReceipt(feature, this.createReviewReceipt(feature, decision, summary, actorName, findings, runId));
     if (decision === "needs_human") return feature;
     return this.transition(id, decision === "approved" ? "done" : decision === "changes_requested" ? "doing" : "blocked");
   }
 
-  async executeFeature(id: string, registry: ExecutionAdapterRegistry, signal?: AbortSignal): Promise<{ outcome: ExecutionOutcome | "needs_human"; feature: Feature; summary: string; adapterId?: string; details?: Record<string, unknown> }> {
+  async executeFeature(id: string, registry: ExecutionAdapterRegistry, signal?: AbortSignal, options: { runId?: string; onEvent?: RepositoryEventCallback } = {}): Promise<{ outcome: ExecutionOutcome | "needs_human"; feature: Feature; summary: string; adapterId?: string; details?: Record<string, unknown> }> {
     const current = await this.requireFeature(id);
     if (current.state !== "ready" && current.state !== "doing") throw new InvalidStateTransitionError(current.state, "doing");
     const profile = await this.inspectExecutionMode(id);
-    const runId = `run-${timestampForFile()}-${shortId()}`;
+    const runId = options.runId ?? `run-${timestampForFile()}-${shortId()}`;
     const request = { root: this.root, feature: current, profile, runId, permissions: "repository" as const, allowedPaths: ["source files and tests; never product/, features/, or .forgium/"], signal };
     const adapter = await registry.resolve(request);
     if (!adapter) return { outcome: "needs_human", feature: current, summary: "No execution adapter is available for this Feature." };
 
     const doing = current.state === "ready" ? await this.startFeature(id) : current;
+    if (current.state === "ready") await options.onEvent?.({ type: "transition", kind: "work.transitioned", phase: "execution", workId: doing.id, state: "doing", message: `Work ${doing.id} transitioned to doing.` });
     const activeProfile = await this.inspectExecutionMode(id);
     const fingerprint = await this.durableFeatureFingerprint(id);
     let result: ExecutionResult;
     try {
-      result = await adapter.execute({ ...request, feature: doing, profile: activeProfile });
+      result = await adapter.execute({
+        ...request,
+        feature: doing,
+        profile: activeProfile,
+        onProgress: async (progress) => options.onEvent?.({
+          type: "status",
+          kind: progress.kind,
+          phase: progress.phase,
+          severity: progress.severity,
+          workId: doing.id,
+          message: progress.message,
+          elapsedMs: progress.elapsedMs,
+        }, { durable: progress.durable === true }),
+      });
     } catch (error) {
       result = { outcome: "needs_human", summary: "Execution adapter failed before returning a structured result.", reason: String((error as Error).message) };
     }
     result.details = { ...(result.details ?? {}), featureFingerprint: fingerprint };
     await this.persistReceipt(doing, this.createExecutionReceipt(doing, runId, adapter.id, result));
     if (result.outcome === "completed") {
-      const verification = await this.verifyFeature(id, { runId });
+      const verification = await this.verifyFeature(id, { runId, onEvent: options.onEvent });
       return { outcome: verification.outcome === "passed" ? result.outcome : verification.outcome === "manual_required" ? "needs_human" : "verification_failed", feature: (await this.requireFeature(id)), summary: result.summary, adapterId: adapter.id, details: result.details };
     }
     if (result.outcome === "blocked") {
@@ -433,7 +478,20 @@ export class FilesystemForgiumRepository {
     for (const file of (await safeReaddir(this.paths.events)).filter((e) => e.endsWith(".ndjson"))) {
       try {
         const lines = (await fs.readFile(path.join(this.paths.events, file), "utf8")).split(/\r?\n/).filter(Boolean);
-        for (const line of lines) RunEventSchema.parse(JSON.parse(line));
+        const seenIds = new Set<string>();
+        const lastSequence = new Map<string, number>();
+        for (const line of lines) {
+          const event = RunEventSchema.parse(JSON.parse(line)) as RunEvent;
+          if (event.schemaVersion !== 2) continue;
+          const eventId = event.eventId!;
+          const runId = event.runId!;
+          const sequence = event.sequence!;
+          if (seenIds.has(eventId)) throw new Error(`Duplicate run event ID: ${eventId}`);
+          seenIds.add(eventId);
+          const previous = lastSequence.get(runId) ?? 0;
+          if (sequence <= previous) throw new Error(`Run event sequence is not increasing for ${runId}.`);
+          lastSequence.set(runId, sequence);
+        }
       } catch (error) { issues.push({ severity: "error", code: "INVALID_RUN_EVENT", message: String((error as Error).message), path: path.join(this.paths.events, file) }); }
     }
     for (const entry of await safeReaddir(this.paths.definitions)) {
@@ -571,9 +629,9 @@ export class FilesystemForgiumRepository {
     };
   }
 
-  private createReviewReceipt(feature: Feature, decision: ReviewDecision, summary: string, actorName: string, findings?: string[]): Receipt {
+  private createReviewReceipt(feature: Feature, decision: ReviewDecision, summary: string, actorName: string, findings?: string[], runId?: string): Receipt {
     return {
-      ...this.receiptBase(feature, "review", decision, summary, `review-${timestampForFile()}-${shortId()}`, "reviewer", actorName),
+      ...this.receiptBase(feature, "review", decision, summary, runId ?? `review-${timestampForFile()}-${shortId()}`, "reviewer", actorName),
       kind: "review",
       outcome: decision,
       decision,
@@ -695,6 +753,7 @@ export class FilesystemForgiumRepository {
     if (item.definitionRef) fm.definitionRef = item.definitionRef;
     if (item.definitionKind) fm.definitionKind = item.definitionKind;
     if (item.featureRef) fm.featureRef = item.featureRef;
+    if (item.clarification) fm.clarification = item.clarification;
     return `---\n${YAML.stringify(fm)}---\n\n# ${item.title}\n${item.body ? `\n${item.body}\n` : ""}`;
   }
 

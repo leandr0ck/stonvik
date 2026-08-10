@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import type { ExecutionProfile } from "../domain/types.js";
 import type { ExecutionAdapter, ExecutionRequest, ExecutionResult } from "./execution-adapter.js";
+import { reportAgentActivity, startHeartbeat } from "./execution-adapter.js";
 
 type SpecFlowStatusSnapshot = {
   complete: boolean;
@@ -22,6 +23,7 @@ export class SpecFlowExecutionAdapter implements ExecutionAdapter {
   constructor(
     private readonly command = process.env.FORGIUM_PI_COMMAND ?? "pi",
     private readonly timeoutMs = 30 * 60 * 1000,
+    private readonly heartbeatIntervalMs = 10_000,
   ) {}
 
   supports(profile: ExecutionProfile): boolean {
@@ -60,10 +62,13 @@ export class SpecFlowExecutionAdapter implements ExecutionAdapter {
     let settled = false;
 
     return new Promise((resolve, reject) => {
+      const stopHeartbeat = startHeartbeat(request.onProgress, "execution", `Spec Flow en ${request.feature.id}`, this.heartbeatIntervalMs);
+      reportAgentActivity(request.onProgress, "execution", "Agente Spec Flow iniciado.");
       const finish = (result: ExecutionResult) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        stopHeartbeat();
         request.signal?.removeEventListener("abort", abort);
         child.kill();
         resolve(result);
@@ -121,8 +126,13 @@ export class SpecFlowExecutionAdapter implements ExecutionAdapter {
           return;
         }
 
-        if (event.type === "extension_ui_request") handleUiRequest(event);
+        if (event.type === "extension_ui_request") {
+          reportAgentActivity(request.onProgress, "execution", "Spec Flow solicitó una interacción estructurada.");
+          handleUiRequest(event);
+        }
+        if (event.type === "tool_execution_start" && event.toolName === "spec_flow_status") reportAgentActivity(request.onProgress, "execution", "Spec Flow inició una comprobación de estado.");
         if (event.type === "tool_execution_end" && event.toolName === "spec_flow_status") {
+          reportAgentActivity(request.onProgress, "execution", "Spec Flow recibió un checkpoint de estado.");
           statusResult = parseSpecFlowStatusResult(event.result?.details);
         }
         if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -159,16 +169,14 @@ export class SpecFlowExecutionAdapter implements ExecutionAdapter {
       child.once("error", (error) => {
         if (!settled) {
           clearTimeout(timeout);
+          stopHeartbeat();
           reject(error);
         }
       });
       child.once("close", (code) => {
-        if (!settled) {
-          clearTimeout(timeout);
-          resolve(code === 0
-            ? statusResult ?? { outcome: "needs_human", summary: "Spec Flow exited without a structured status result." }
-            : { outcome: "needs_human", summary: `Pi exited before producing a Spec Flow status (code ${code ?? "unknown"}).` });
-        }
+        if (!settled) finish(code === 0
+          ? statusResult ?? { outcome: "needs_human", summary: "Spec Flow exited without a structured status result." }
+          : { outcome: "needs_human", summary: `Pi exited before producing a Spec Flow status (code ${code ?? "unknown"}).` });
       });
       request.signal?.addEventListener("abort", abort, { once: true });
       send({ id: request.runId, type: "prompt", message: profile.commands.implement });
