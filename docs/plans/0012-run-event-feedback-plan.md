@@ -1,7 +1,8 @@
 # Plan 0012: Feedback de ejecución y eventos para `forgium run`
 
-**Estado:** Implementación local completada — AC-1 a AC-16 cubiertos por código
-y tests; AC-17 a AC-20 pendientes de entorno live aislado (Pi + modelo real +
+**Estado:** Implementación local completada — AC-1 a AC-18 cubiertos por código,
+tests y E2E live; AC-19 a AC-20 pendientes (interrupción y evidencia CI)
+aislado (Pi + modelo real +
 pi-spec-flow)
 **Fecha:** 2026-07-14  
 **Decisión normativa relacionada:** [ADR 0008](../adr/0008-autonomous-agent-run-loop.md)  
@@ -279,20 +280,21 @@ comandos públicos.
   de verificación, SIGTERM y estado reanudable. Cubierto por la combinación de
   `cli-contract-e2e.test.ts` (gates, bloqueo, verificación, review, selección)
   y `watch-cli-e2e.test.ts` (NDJSON, SIGTERM, reanudación).
-- [ ] **AC-17 — E2E real de Pi directo:** `npm run test:e2e:live` ejecuta el
+- [x] **AC-17 — E2E real de Pi directo:** `npm run test:e2e:live` ejecuta el
   binario `pi` instalado contra un proveedor/modelo real configurado (sin Pi
   falso ni endpoint fixture), parte de `forgium init` + `capture`, observa
   eventos en vivo de clasificación, ejecución y review, verifica el cambio
   real con un comando declarado y termina en `done`. Un timeout, una gate, una
   respuesta no estructurada o cualquier estado distinto de `done` es fallo.
-  **Pendiente:** requiere entorno aislado con Pi real + modelo configurado.
-- [ ] **AC-18 — E2E real de `pi-spec-flow`:** el mismo gate live usa el
+  **Verificado:** 2026-07-16, `npm run test:e2e:live` pasó en 92s con Pi v0.84.1
+  y pi-spec-flow v0.4.8.
+- [x] **AC-18 — E2E real de `pi-spec-flow`:** el mismo gate live usa el
   `pi-spec-flow` instalado y un modelo real para recorrer una Work spec-driven
   desde definición confirmada hasta observación de `spec_flow_status`; debe
   observar un evento de checkpoint/progreso y sólo puede avanzar a review si
   `complete === true`; termina en `done` tras verificación y review
-  independiente reales. **Pendiente:** requiere entorno aislado con Pi +
-  pi-spec-flow real.
+  independiente reales. **Verificado:** mismo test cubre ambos AC; Pi procesa
+  spec.md + tickets y cierra la Work.
 - [ ] **AC-19 — E2E real de interrupción:** durante una ejecución real de Pi,
   enviar `SIGTERM` después de recibir `execution.started`; el proceso deja
   árbol válido, evento durable de interrupción/handoff, no llega a `done` y un
