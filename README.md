@@ -98,6 +98,10 @@ raw request
 - There is no automatic approval or transition from `doing` to `done`. Forgium
   makes at most one in-memory repair attempt for an invalid classifier
   response; it never retries persisted Work execution, verification, or review.
+- Each Inbox classification uses an isolated Pi session. The reusable Pi
+  process starts without tools, extensions, skills, prompt templates, or
+  repository context; a failed, cancelled, or unacknowledged session reset
+  fails closed rather than reusing prior Inbox context.
 - Work transitions move the complete directory; individual Spec Flow
   tickets remain owned by `pi-spec-flow`.
 - Receipts and repository artifacts are durable; leases and process logs under
@@ -111,7 +115,7 @@ raw request
 product/
 ├── inbox/                  # Unresolved raw product intent
 ├── inbox-receipts/         # Classification evidence not yet attached to Work
-└── events/                 # Durable RunEvent NDJSON
+└── events/                 # Durable RunEvent NDJSON, partitioned by date and run
 
 features/
 ├── definition/             # Human Spec/ADR definitions; never executable

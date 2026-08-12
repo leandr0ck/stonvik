@@ -37,6 +37,7 @@ async function fakePi(root: string, mode: "valid" | "invalid" | "blocked" | "noc
     "  for (const line of chunk.toString().split('\\n')) {",
     "    if (!line.trim()) continue;",
     "    let request; try { request = JSON.parse(line); } catch { continue; }",
+    "    if (request.type === 'new_session') { process.stdout.write(JSON.stringify({ type: 'response', id: request.id, command: 'new_session', success: true, data: { cancelled: false } }) + '\\n'); continue; }",
     "    const prompt = String(request.message ?? '');",
     `    if (prompt.includes('Classify the untrusted Inbox')) emit(${JSON.stringify(assistant)});`,
     `    else if (prompt.includes('independent, read-only Forgium Work reviewer')) emit('FORGIUM_REVIEW: ${mode === "changes" ? '{"outcome":"changes_requested","summary":"Add more coverage.","findings":[],"evidence":[]}' : '{"outcome":"approved","summary":"Independent review approved.","findings":[],"evidence":[]}'}');`,
@@ -95,7 +96,8 @@ describe("Forgium autonomous CLI contract", () => {
     expect(result.stdout).not.toContain("Definition required:");
     expect(await json(root, ["inbox"])).toMatchObject([{ status: "captured" }]);
     const date = new Date().toISOString().slice(0, 10);
-    const events = (await fs.readFile(path.join(root, "product", "events", `${date}.ndjson`), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const eventDir = path.join(root, "product", "events", date);
+    const events = (await Promise.all((await fs.readdir(eventDir)).map(async (file) => (await fs.readFile(path.join(eventDir, file), "utf8")).trim().split("\n").map((line) => JSON.parse(line))))).flat();
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: "gate",
@@ -223,10 +225,12 @@ async function fakePiWithClassification(root: string, classification: object): P
   await fs.writeFile(command, [
     "#!/usr/bin/env node",
     "if (process.argv.includes('--version')) process.exit(0);",
-    "process.stdin.on('data', () => {",
+    "process.stdin.on('data', (chunk) => { for (const line of chunk.toString().split('\\n')) {",
+    "  if (!line.trim()) continue; const request = JSON.parse(line);",
+    "  if (request.type === 'new_session') { process.stdout.write(JSON.stringify({ type: 'response', id: request.id, command: 'new_session', success: true, data: { cancelled: false } }) + '\\n'); continue; }",
     `  process.stdout.write(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: ${JSON.stringify(assistant)} }] }] }) + '\\n');`,
     "  process.stdout.write(JSON.stringify({ type: 'agent_settled' }) + '\\n');",
-    "});",
+    "} });",
   ].join("\n"));
   await fs.chmod(command, 0o755);
   return command;

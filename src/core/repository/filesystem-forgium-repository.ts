@@ -11,11 +11,11 @@ import { FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictEr
 import { InboxFrontmatterSchema } from "../schemas/inbox.schema.js";
 import { ManifestSchema } from "../schemas/manifest.schema.js";
 import { ReceiptSchema } from "../schemas/receipt.schema.js";
-import { ClassificationSchema } from "../schemas/classification.schema.js";
 import { DefinitionDocumentSchema, DefinitionMetadataSchema } from "../schemas/definition.schema.js";
 import { ClassificationReceiptSchema } from "../schemas/classification-receipt.schema.js";
 import { RunEventSchema } from "../schemas/run-event.schema.js";
 import { isoNow, shortId, slugify, timestampForFile } from "../services/id.js";
+import { validateClassification } from "../services/classification.js";
 import { specFlowCommandsForSpec } from "../services/spec-flow-commands.js";
 import { canTransition } from "../transitions/transition-rules.js";
 import { forgiumPaths } from "./paths.js";
@@ -29,6 +29,8 @@ type RepositoryEventCallback = (event: Omit<RunEvent, "at">, options?: { durable
 
 export class FilesystemForgiumRepository {
   private readonly paths;
+  private readonly eventStreams = new Map<string, { eventIds: Set<string>; lastSequence: number }>();
+  private readonly eventWrites = new Map<string, Promise<void>>();
   constructor(public readonly root: string) { this.paths = forgiumPaths(root); }
 
   async init(): Promise<void> {
@@ -63,17 +65,22 @@ export class FilesystemForgiumRepository {
   }
 
   async persistEvent(event: RunEvent): Promise<void> {
-    RunEventSchema.parse(event);
-    await fs.mkdir(this.paths.events, { recursive: true });
-    const eventPath = path.join(this.paths.events, `${event.at.slice(0, 10)}.ndjson`);
-    const current = await fs.readFile(eventPath, "utf8").catch(() => "");
-    if (event.schemaVersion === 2) {
-      const existing = current.split(/\r?\n/).filter(Boolean).map((line) => RunEventSchema.parse(JSON.parse(line)) as RunEvent);
-      if (existing.some((candidate) => candidate.schemaVersion === 2 && candidate.eventId === event.eventId)) throw new Error(`Duplicate run event ID: ${event.eventId}`);
-      const lastSequence = existing.filter((candidate) => candidate.schemaVersion === 2 && candidate.runId === event.runId).map((candidate) => candidate.sequence ?? 0).at(-1) ?? 0;
-      if ((event.sequence ?? 0) <= lastSequence) throw new Error(`Run event sequence is not increasing for ${event.runId}.`);
+    const parsed = RunEventSchema.parse(event) as RunEvent;
+    const eventPath = path.join(this.paths.events, event.at.slice(0, 10), `${encodeURIComponent(event.runId ?? "legacy")}.ndjson`);
+    const previous = this.eventWrites.get(eventPath) ?? Promise.resolve();
+    const write = previous.catch(() => undefined).then(async () => {
+      await fs.mkdir(path.dirname(eventPath), { recursive: true });
+      const stream = await this.eventStream(eventPath);
+      this.validateEventAppend(parsed, stream);
+      await fs.appendFile(eventPath, `${JSON.stringify(parsed)}\n`, "utf8");
+      this.recordEventAppend(parsed, stream);
+    });
+    this.eventWrites.set(eventPath, write);
+    try {
+      await write;
+    } finally {
+      if (this.eventWrites.get(eventPath) === write) this.eventWrites.delete(eventPath);
     }
-    await this.writeFileAtomic(eventPath, `${current}${JSON.stringify(event)}\n`);
   }
 
   async capture(input: CaptureInput): Promise<InboxItem> {
@@ -108,48 +115,73 @@ export class FilesystemForgiumRepository {
 
   async deferInbox(id: string): Promise<InboxItem> {
     const item = await this.requireInbox(id);
-    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
-    const deferred = { ...item, status: "deferred" as const };
+    return this.deferInboxItem(item);
+  }
+
+  async deferInboxItem(item: InboxItem): Promise<InboxItem> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id || current.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${item.id}`);
+    const deferred = { ...current, status: "deferred" as const };
     await this.writeInboxItem(deferred);
     return deferred;
   }
 
   async requestInboxClarification(id: string, field: ClarificationField): Promise<InboxItem> {
     const item = await this.requireInbox(id);
-    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
-    const pending = { ...item, status: "needs_clarification" as const, clarification: { field } };
+    return this.requestInboxClarificationItem(item, field);
+  }
+
+  async requestInboxClarificationItem(item: InboxItem, field: ClarificationField): Promise<InboxItem> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id || current.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${item.id}`);
+    const pending = { ...current, status: "needs_clarification" as const, clarification: { field } };
     await this.writeInboxItem(pending);
     return pending;
   }
 
   async answerInboxClarification(id: string, answer: string): Promise<InboxItem> {
     const item = await this.requireInbox(id);
+    return this.answerInboxClarificationItem(item, answer);
+  }
+
+  async answerInboxClarificationItem(item: InboxItem, answer: string): Promise<InboxItem> {
+    const current = await this.readInboxFile(item.path);
     const normalized = answer.trim();
-    if (item.status !== "needs_clarification" || !item.clarification || !normalized) throw new InvalidInboxItemError(`Inbox item does not have a pending clarification: ${id}`);
-    const answered = { ...item, status: "captured" as const, clarification: { ...item.clarification, answer: normalized } };
+    if (current.id !== item.id || current.status !== "needs_clarification" || !current.clarification || !normalized) throw new InvalidInboxItemError(`Inbox item does not have a pending clarification: ${item.id}`);
+    const answered = { ...current, status: "captured" as const, clarification: { ...current.clarification, answer: normalized } };
     await this.writeInboxItem(answered);
     return answered;
   }
 
   async rejectInbox(id: string): Promise<InboxItem> {
     const item = await this.requireInbox(id);
-    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
-    const rejected = { ...item, status: "rejected" as const };
+    return this.rejectInboxItem(item);
+  }
+
+  async rejectInboxItem(item: InboxItem): Promise<InboxItem> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id || current.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${item.id}`);
+    const rejected = { ...current, status: "rejected" as const };
     await this.writeInboxItem(rejected);
     return rejected;
   }
 
   async requireDefinitionForInbox(id: string, kind: "spec" | "adr", legacyReference = false): Promise<InboxItem> {
     const item = await this.requireInbox(id);
-    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${id}`);
-    const slug = `${slugify(item.title)}-${item.id.slice(-5)}`;
+    return this.requireDefinitionForInboxItem(item, kind, legacyReference);
+  }
+
+  async requireDefinitionForInboxItem(item: InboxItem, kind: "spec" | "adr", legacyReference = false): Promise<InboxItem> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id || current.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${item.id}`);
+    const slug = `${slugify(current.title)}-${current.id.slice(-5)}`;
     const definitionDir = this.paths.definitionDir(slug);
     const definitionPath = path.join(definitionDir, kind === "spec" ? "spec.md" : "adr.md");
     if (await exists(definitionDir)) throw new InvalidInboxItemError(`Definition already exists: ${path.relative(this.root, definitionDir)}`);
     await fs.mkdir(definitionDir, { recursive: false });
     try {
-      await this.writeFileAtomic(path.join(definitionDir, "definition.yaml"), YAML.stringify({ schemaVersion: 1, inboxRef: item.id, kind, created: isoNow(), document: path.basename(definitionPath) }));
-      await this.writeFileAtomic(definitionPath, this.renderDefinitionTemplate(item, kind));
+      await this.writeFileAtomic(path.join(definitionDir, "definition.yaml"), YAML.stringify({ schemaVersion: 1, inboxRef: current.id, kind, created: isoNow(), document: path.basename(definitionPath) }));
+      await this.writeFileAtomic(definitionPath, this.renderDefinitionTemplate(current, kind));
     } catch (error) {
       await fs.rm(definitionDir, { recursive: true, force: true });
       throw error;
@@ -159,26 +191,31 @@ export class FilesystemForgiumRepository {
       referencePath = path.join(kind === "spec" ? this.paths.specs : this.paths.adrs, `${slug}.md`);
       await this.writeFileAtomic(referencePath, await fs.readFile(definitionPath, "utf8"));
     }
-    const needsDefinition = { ...item, status: "needs_definition" as const, definitionRef: path.relative(this.root, referencePath), definitionKind: kind };
+    const needsDefinition = { ...current, status: "needs_definition" as const, definitionRef: path.relative(this.root, referencePath), definitionKind: kind };
     await this.writeInboxItem(needsDefinition);
     return needsDefinition;
   }
 
   async confirmDefinitionForInbox(id: string): Promise<Feature> {
     const item = await this.requireInbox(id);
-    if (item.status !== "needs_definition" || !item.definitionRef || !item.definitionKind) throw new InvalidInboxItemError(`Inbox item does not require a definition: ${id}`);
-    const referencedPath = path.resolve(this.root, item.definitionRef);
-    const internalDir = this.paths.definitionDir(`${slugify(item.title)}-${item.id.slice(-5)}`);
+    return this.confirmDefinitionForInboxItem(item);
+  }
+
+  async confirmDefinitionForInboxItem(item: InboxItem): Promise<Feature> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id || current.status !== "needs_definition" || !current.definitionRef || !current.definitionKind) throw new InvalidInboxItemError(`Inbox item does not require a definition: ${item.id}`);
+    const referencedPath = path.resolve(this.root, current.definitionRef);
+    const internalDir = this.paths.definitionDir(`${slugify(current.title)}-${current.id.slice(-5)}`);
     const allowedReference = isWithin(this.paths.definitions, referencedPath)
-      || isWithin(item.definitionKind === "spec" ? this.paths.specs : this.paths.adrs, referencedPath);
+      || isWithin(current.definitionKind === "spec" ? this.paths.specs : this.paths.adrs, referencedPath);
     const documentPath = referencedPath;
-    if (!allowedReference) throw new InvalidInboxItemError(`Definition path is outside the definition tree: ${item.definitionRef}`);
-    if (!(await exists(documentPath)) || !(await exists(internalDir))) throw new InvalidInboxItemError(`Definition is missing: ${item.definitionRef}`);
+    if (!allowedReference) throw new InvalidInboxItemError(`Definition path is outside the definition tree: ${current.definitionRef}`);
+    if (!(await exists(documentPath)) || !(await exists(internalDir))) throw new InvalidInboxItemError(`Definition is missing: ${current.definitionRef}`);
     const metadataPath = path.join(internalDir, "definition.yaml");
     const metadata = DefinitionMetadataSchema.safeParse(YAML.parse(await fs.readFile(metadataPath, "utf8")));
-    if (!metadata.success || metadata.data.inboxRef !== item.id || metadata.data.kind !== item.definitionKind || (metadata.data.document !== path.basename(documentPath) && metadata.data.document !== (item.definitionKind === "spec" ? "spec.md" : "adr.md"))) throw new InvalidInboxItemError(`Definition metadata is invalid: ${item.definitionRef}`);
-    const definition = await this.readDefinitionWorkDefinition(documentPath, item);
-    return this.createFeatureFromInbox(item.id, definition);
+    if (!metadata.success || metadata.data.inboxRef !== current.id || metadata.data.kind !== current.definitionKind || (metadata.data.document !== path.basename(documentPath) && metadata.data.document !== (current.definitionKind === "spec" ? "spec.md" : "adr.md"))) throw new InvalidInboxItemError(`Definition metadata is invalid: ${current.definitionRef}`);
+    const definition = await this.readDefinitionWorkDefinition(documentPath, current);
+    return this.createFeatureFromInboxItem(current, definition);
   }
 
   async mergeInbox(id: string, featureId: string): Promise<InboxItem> {
@@ -207,6 +244,11 @@ export class FilesystemForgiumRepository {
       verification: input.verification,
       classification: input.classification,
     };
+    try {
+      if (manifest.classification) validateClassification(manifest.classification);
+    } catch (error) {
+      throw new InvalidManifestError(`Invalid classification: ${String((error as Error).message)}`);
+    }
     const parsed = ManifestSchema.safeParse(manifest);
     if (!parsed.success) throw new InvalidManifestError(parsed.error.message);
     const staging = path.join(this.paths.featureStateDir("ready"), `.creating-${slug}-${process.pid}-${shortId()}`);
@@ -222,14 +264,16 @@ export class FilesystemForgiumRepository {
   }
 
   async recordClassification(item: InboxItem, classification: Classification, runId: string): Promise<void> {
-    const current = await this.requireInbox(item.id);
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id) throw new InvalidInboxItemError(`Inbox item does not match its path: ${item.id}`);
     if (current.status !== "captured" && current.status !== "needs_definition") {
       throw new InvalidInboxItemError(`Inbox item is already attached or closed: ${item.id}`);
     }
-    const parsed = ClassificationSchema.safeParse(classification);
-    if (!parsed.success) throw new InvalidInboxItemError(`Invalid classification: ${parsed.error.message}`);
+    let parsed: Classification;
+    try { parsed = validateClassification(classification); }
+    catch (error) { throw new InvalidInboxItemError(`Invalid classification: ${String((error as Error).message)}`); }
     await fs.mkdir(this.paths.inboxReceipts, { recursive: true });
-    const receipt = { schemaVersion: 1 as const, kind: "classification" as const, inboxId: current.id, runId, created: isoNow(), outcome: "classified" as const, classification: parsed.data };
+    const receipt = { schemaVersion: 1 as const, kind: "classification" as const, inboxId: current.id, runId, created: isoNow(), outcome: "classified" as const, classification: parsed };
     ClassificationReceiptSchema.parse(receipt);
     const baseName = `${item.id}-${runId}`;
     const preferredPath = path.join(this.paths.inboxReceipts, `${baseName}.yaml`);
@@ -239,10 +283,15 @@ export class FilesystemForgiumRepository {
 
   async createFeatureFromInbox(inboxId: string, input: Omit<CreateFeatureInput, "source">): Promise<Feature> {
     const item = await this.requireInbox(inboxId);
-    if (item.status !== "captured" && item.status !== "needs_definition") throw new InvalidInboxItemError(`Inbox item cannot create Work: ${inboxId}`);
-    const feature = await this.createFeature({ ...input, source: { type: "inbox", ref: item.id } });
+    return this.createFeatureFromInboxItem(item, input);
+  }
+
+  async createFeatureFromInboxItem(item: InboxItem, input: Omit<CreateFeatureInput, "source">): Promise<Feature> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id || (current.status !== "captured" && current.status !== "needs_definition")) throw new InvalidInboxItemError(`Inbox item cannot create Work: ${item.id}`);
+    const feature = await this.createFeature({ ...input, source: { type: "inbox", ref: current.id } });
     try {
-      await this.moveInboxProvenance(item, feature, "promoted");
+      await this.moveInboxProvenance(current, feature, "promoted");
     } catch (error) {
       await fs.rm(feature.path, { recursive: true, force: true });
       throw error;
@@ -475,9 +524,9 @@ export class FilesystemForgiumRepository {
       try { ClassificationReceiptSchema.parse(YAML.parse(await fs.readFile(path.join(this.paths.inboxReceipts, file), "utf8"))); }
       catch (error) { issues.push({ severity: "error", code: "INVALID_CLASSIFICATION_RECEIPT", message: String((error as Error).message), path: path.join(this.paths.inboxReceipts, file) }); }
     }
-    for (const file of (await safeReaddir(this.paths.events)).filter((e) => e.endsWith(".ndjson"))) {
+    for (const file of await recursiveFiles(this.paths.events, (entry) => entry.endsWith(".ndjson"))) {
       try {
-        const lines = (await fs.readFile(path.join(this.paths.events, file), "utf8")).split(/\r?\n/).filter(Boolean);
+        const lines = (await fs.readFile(file, "utf8")).split(/\r?\n/).filter(Boolean);
         const seenIds = new Set<string>();
         const lastSequence = new Map<string, number>();
         for (const line of lines) {
@@ -492,7 +541,7 @@ export class FilesystemForgiumRepository {
           if (sequence <= previous) throw new Error(`Run event sequence is not increasing for ${runId}.`);
           lastSequence.set(runId, sequence);
         }
-      } catch (error) { issues.push({ severity: "error", code: "INVALID_RUN_EVENT", message: String((error as Error).message), path: path.join(this.paths.events, file) }); }
+      } catch (error) { issues.push({ severity: "error", code: "INVALID_RUN_EVENT", message: String((error as Error).message), path: file }); }
     }
     for (const entry of await safeReaddir(this.paths.definitions)) {
       const definitionDir = this.paths.definitionDir(entry);
@@ -810,6 +859,30 @@ export class FilesystemForgiumRepository {
     if (!current.split(/\r?\n/).includes(line)) await fs.appendFile(gitignore, `${current.endsWith("\n") || current.length === 0 ? "" : "\n"}${line}\n`);
   }
 
+  private async eventStream(eventPath: string): Promise<{ eventIds: Set<string>; lastSequence: number }> {
+    const existing = this.eventStreams.get(eventPath);
+    if (existing) return existing;
+    const stream = { eventIds: new Set<string>(), lastSequence: 0 };
+    const lines = (await fs.readFile(eventPath, "utf8").catch(() => "")).split(/\r?\n/).filter(Boolean);
+    for (const line of lines) this.recordEventAppend(RunEventSchema.parse(JSON.parse(line)) as RunEvent, stream);
+    this.eventStreams.set(eventPath, stream);
+    return stream;
+  }
+
+  private validateEventAppend(event: RunEvent, stream: { eventIds: Set<string>; lastSequence: number }): void {
+    if (event.schemaVersion !== 2) return;
+    if (stream.eventIds.has(event.eventId!)) throw new Error(`Duplicate run event ID: ${event.eventId}`);
+    if (event.sequence! <= stream.lastSequence) throw new Error(`Run event sequence is not increasing for ${event.runId}.`);
+  }
+
+  private recordEventAppend(event: RunEvent, stream: { eventIds: Set<string>; lastSequence: number }): void {
+    if (event.schemaVersion !== 2) return;
+    if (stream.eventIds.has(event.eventId!)) throw new Error(`Duplicate run event ID: ${event.eventId}`);
+    if (event.sequence! <= stream.lastSequence) throw new Error(`Run event sequence is not increasing for ${event.runId}.`);
+    stream.eventIds.add(event.eventId!);
+    stream.lastSequence = event.sequence!;
+  }
+
   private async writeFileAtomic(filePath: string, content: string): Promise<void> {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
@@ -825,6 +898,15 @@ export class FilesystemForgiumRepository {
 
 async function exists(filePath: string): Promise<boolean> { try { await fs.access(filePath); return true; } catch { return false; } }
 async function safeReaddir(dir: string): Promise<string[]> { try { return await fs.readdir(dir); } catch { return []; } }
+async function recursiveFiles(dir: string, include: (name: string) => boolean): Promise<string[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as fssync.Dirent[]);
+  const files = await Promise.all(entries.map(async (entry) => {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) return recursiveFiles(entryPath, include);
+    return include(entry.name) ? [entryPath] : [];
+  }));
+  return files.flat();
+}
 function isWithin(parent: string, child: string): boolean {
   const relative = path.relative(path.resolve(parent), child);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));

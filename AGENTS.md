@@ -63,6 +63,24 @@ no estén documentados; pide aclaración si falta una decisión necesaria.
 - Mantén la salida humana de CLI concisa; las integraciones deben poder usar
   salida JSON estructurada cuando esté disponible.
 
+## Prácticas obligatorias para clasificación y rendimiento
+
+- No releas, parsees y reescribas un log histórico por cada evento. Los
+  eventos durables se particionan por fecha y `runId`; el stream se escribe de
+  forma incremental y `forgium validate` conserva la auditoría completa.
+- El schema valida forma, no todas las invariantes de dominio. Antes de
+  persistir una clasificación o incluirla en un `manifest`, aplica la
+  validación semántica determinista (sizing, ruta y `complexityScore`).
+- Evita escanear todo el Inbox dentro de operaciones por ítem. Una pasada del
+  loop debe reutilizar una instantánea y las APIs del repositorio deben
+  revalidar únicamente el archivo objetivo bajo el lease.
+- Reutiliza el proceso Pi para clasificaciones de una misma pasada para evitar
+  coste de arranque, pero abre una sesión nueva entre Inbox items: nunca dejes
+  que intención o salida no confiable de un ítem contamine otro.
+- Conserva rutas e identificadores literales de la intención en objetivo y
+  aceptación. No los fuerces en comandos de verificación si no son necesarios:
+  la verificación debe ser semánticamente útil, no cumplir una plantilla.
+
 ## Desarrollo y validación
 
 ```bash

@@ -12,7 +12,7 @@ pi-spec-flow)
 
 `forgium run` puede permanecer varios minutos ejecutando clasificación, Pi,
 `pi-spec-flow`, verificación o review sin producir salida visible. El core ya
-genera y persiste `RunEvent` en `product/events/<fecha>.ndjson`, y
+genera y persiste `RunEvent` en `product/events/<fecha>/<runId>.ndjson`, y
 `forgium run --watch` ya los imprime incrementalmente. Sin embargo, la
 invocación normal acumula los eventos hasta que el loop termina, por lo que la
 persona usuaria no puede distinguir trabajo en curso de un proceso bloqueado.
@@ -154,6 +154,21 @@ de checkpoint/UI, status estructurado y errores de proceso. El adaptador:
 3. transforma un evento RPC desconocido en nada, no en una transición;
 4. sigue fallando cerrado si falta el resultado estructurado requerido;
 5. detiene el heartbeat al terminar, fallar o abortar la operación.
+
+### 3.5 Aislamiento de clasificación Pi
+
+La clasificación reutiliza un proceso Pi sólo dentro de una pasada, pero envía
+`new_session` correlacionado antes de cada Inbox posterior. La respuesta RPC
+debe confirmar `command: "new_session"`, el mismo `id` y
+`data.cancelled: false`; una respuesta rechazada, cancelada, ausente o una
+señal agota el timeout, termina el proceso y falla cerrado. El proceso de
+clasificación se inicia sin tools, extensiones, skills, templates ni context
+files: el Inbox no confiable sólo se entrega como dato al prompt.
+
+La persistencia de cada stream `fecha/runId` serializa el append y valida
+`eventId` único y secuencia creciente antes de escribir. El estado de ese
+stream se carga una vez por proceso; no se relee ni reescribe el historial por
+evento.
 
 ## 4. Frontera para integraciones futuras
 

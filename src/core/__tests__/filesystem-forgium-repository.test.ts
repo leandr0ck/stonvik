@@ -112,6 +112,49 @@ describe("FilesystemForgiumRepository", () => {
     await expect(repo.validate()).resolves.toMatchObject({ valid: true });
   });
 
+  it("rejects semantically invalid classifications before writing durable evidence", async () => {
+    const { root, repo } = await tempRepo();
+    const inbox = await repo.capture({ text: "Create names.md" });
+
+    await expect(repo.recordClassification(inbox, {
+      route: "auto_direct", size: "XS", estimatedTouchedFiles: 1, complexityScore: 2, confidence: 0.9, risks: [], rationale: ["Small change."],
+      proposed: { title: "Create names.md", goal: "Create names.md.", acceptance: ["names.md exists."], verification: { commands: [{ name: "pass", run: "true" }] } },
+    }, "run-invalid")).rejects.toThrow("complexityScore");
+
+    await expect(fs.readdir(path.join(root, "product", "inbox-receipts"))).resolves.toEqual([]);
+  });
+
+  it("appends events to an isolated run stream that validates with historical event files", async () => {
+    const { root, repo } = await tempRepo();
+    const date = "2026-07-17";
+    for (const sequence of [1, 2]) {
+      await repo.persistEvent({
+        schemaVersion: 2, eventId: `event-run-perf-${sequence}`, runId: "run/perf", sequence,
+        at: `${date}T00:00:0${sequence}.000Z`, type: "status", kind: "classification.started", phase: "classification", severity: "info", message: "Classifying.",
+      });
+    }
+
+    const eventPath = path.join(root, "product", "events", date, "run%2Fperf.ndjson");
+    await expect(fs.readFile(eventPath, "utf8")).resolves.toMatch(/event-run-perf-1[\s\S]*event-run-perf-2/);
+    await expect(repo.validate()).resolves.toMatchObject({ valid: true });
+  });
+
+  it("rejects duplicate or unordered event records before appending them", async () => {
+    const { root, repo } = await tempRepo();
+    const event = {
+      schemaVersion: 2 as const, eventId: "event-once", runId: "run-ordered", sequence: 1,
+      at: "2026-07-17T00:00:01.000Z", type: "status" as const, message: "Classifying.",
+    };
+    await repo.persistEvent(event);
+    const eventPath = path.join(root, "product", "events", "2026-07-17", "run-ordered.ndjson");
+    const persisted = await fs.readFile(eventPath, "utf8");
+
+    await expect(repo.persistEvent({ ...event, at: "2026-07-17T00:00:02.000Z" })).rejects.toThrow("Duplicate run event ID");
+    await expect(repo.persistEvent({ ...event, eventId: "event-out-of-order", sequence: 1, at: "2026-07-17T00:00:03.000Z" })).rejects.toThrow("sequence is not increasing");
+    await expect(fs.readFile(eventPath, "utf8")).resolves.toBe(persisted);
+    await expect(repo.validate()).resolves.toMatchObject({ valid: true });
+  });
+
   it("migrates legacy promoted Inbox provenance without deleting evidence", async () => {
     const { root, repo } = await tempRepo();
     const inbox = await repo.capture({ text: "Add notifications" });

@@ -71,13 +71,14 @@ export class AgentLoop {
         } else return this.stop(result, reasonForExecution(execution.outcome, execution.summary), execution.summary, emit);
       }
 
-      const definitionStop = await this.processDefinitions(result, options, emit);
+      const inbox = await this.repo.listInbox();
+      const definitionStop = await this.processDefinitions(inbox, result, options, emit);
       if (definitionStop) return this.stop(result, definitionStop.reason, definitionStop.nextAction, emit);
 
-      const clarificationStop = await this.processClarifications(result, options, emit);
+      const clarificationStop = await this.processClarifications(inbox, result, options, emit);
       if (clarificationStop) return this.stop(result, clarificationStop.reason, clarificationStop.nextAction, emit);
 
-      const classificationStop = await this.processInbox(result, options, emit, runId);
+      const classificationStop = await this.processInbox(inbox, result, options, emit, runId);
       if (classificationStop) return this.stop(result, classificationStop.reason, classificationStop.nextAction, emit);
 
       if (options.dryRun) {
@@ -102,8 +103,8 @@ export class AgentLoop {
     }
   }
 
-  private async processDefinitions(result: AgentLoopResult, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>): Promise<{ reason: string; nextAction: string } | null> {
-    for (const item of (await this.repo.listInbox()).filter((candidate) => candidate.status === "needs_definition")) {
+  private async processDefinitions(inbox: InboxItem[], result: AgentLoopResult, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>): Promise<{ reason: string; nextAction: string } | null> {
+    for (const item of inbox.filter((candidate) => candidate.status === "needs_definition")) {
       if (options.dryRun) { result.actions.push({ kind: "inbox", id: item.id, action: "definition_confirmation_planned", nextAction: `Complete and confirm ${item.definitionRef}.`, definitionRef: item.definitionRef, definitionKind: item.definitionKind }); return { reason: "dry_run", nextAction: `Complete and confirm ${item.definitionRef}.` }; }
       if (options.nonInteractive || !options.confirmDefinition) {
         await emit({ type: "gate", kind: "definition.awaiting_confirmation", phase: "definition", inboxId: item.id, severity: "warning", message: `Definition confirmation is required for ${item.id}.`, nextAction: `Complete and confirm ${item.definitionRef}.` });
@@ -112,7 +113,7 @@ export class AgentLoop {
       }
       if (await options.confirmDefinition(item)) {
         try {
-          const feature = await this.repo.confirmDefinitionForInbox(item.id);
+          const feature = await this.repo.confirmDefinitionForInboxItem(item);
           result.actions.push({ kind: "inbox", id: item.id, action: `definition_confirmed:${feature.id}` });
           await emit({ type: "transition", kind: "work.transitioned", phase: "definition", inboxId: item.id, workId: feature.id, state: "ready", message: `Confirmed definition and created ready Work ${feature.id}.` });
         } catch (error) {
@@ -127,8 +128,8 @@ export class AgentLoop {
     return null;
   }
 
-  private async processClarifications(result: AgentLoopResult, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>): Promise<{ reason: string; nextAction: string } | null> {
-    for (const item of (await this.repo.listInbox()).filter((candidate) => candidate.status === "needs_clarification" && candidate.clarification)) {
+  private async processClarifications(inbox: InboxItem[], result: AgentLoopResult, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>): Promise<{ reason: string; nextAction: string } | null> {
+    for (const item of inbox.filter((candidate) => candidate.status === "needs_clarification" && candidate.clarification)) {
       const question = clarificationQuestion(item.clarification!.field);
       const nextAction = `Answer with \`forgium inbox answer ${item.id} <answer>\`, then run \`forgium run\` again.`;
       if (options.dryRun) {
@@ -146,92 +147,105 @@ export class AgentLoop {
         result.actions.push({ kind: "inbox", id: item.id, action: "needs_clarification", nextAction });
         return { reason: "human_input_required", nextAction };
       }
-      await this.repo.answerInboxClarification(item.id, answer);
+      const answered = await this.repo.answerInboxClarificationItem(item, answer);
+      item.status = answered.status;
+      item.clarification = answered.clarification;
       await emit({ type: "classification", kind: "clarification.answered", phase: "classification", inboxId: item.id, message: `Received the clarification needed for ${item.id}.` });
     }
     return null;
   }
 
-  private async processInbox(result: AgentLoopResult, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>, runId: string, answeredClarifications = new Set<string>()): Promise<{ reason: string; nextAction: string } | null> {
-    const classifier = options.classify ?? (async (item: InboxItem, signal?: AbortSignal, onProgress?: import("../execution/execution-adapter.js").AdapterProgressCallback, repairReason?: string) => {
-      return new PiClassificationAdapter(process.env.FORGIUM_PI_COMMAND ?? "pi").classify(item, signal, onProgress, repairReason);
-    });
-    for (const item of (await this.repo.listInbox()).filter((candidate) => candidate.status === "captured")) {
-      let classification: Classification;
-      let repaired = false;
-      try {
-        if (options.dryRun) { result.actions.push({ kind: "inbox", id: item.id, action: "classification_planned", nextAction: `Classify Inbox item ${item.id}.` }); continue; }
+  private async processInbox(inbox: InboxItem[], result: AgentLoopResult, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>, runId: string, answeredClarifications = new Set<string>()): Promise<{ reason: string; nextAction: string } | null> {
+    const piClassifier = options.classify ? undefined : new PiClassificationAdapter(process.env.FORGIUM_PI_COMMAND ?? "pi");
+    const classifier = options.classify ?? ((item: InboxItem, signal?: AbortSignal, onProgress?: import("../execution/execution-adapter.js").AdapterProgressCallback, repairReason?: string) => piClassifier!.classify(item, signal, onProgress, repairReason));
+    try {
+      for (let item of inbox.filter((candidate) => candidate.status === "captured")) {
+        if (options.dryRun) {
+          result.actions.push({ kind: "inbox", id: item.id, action: "classification_planned", nextAction: `Classify Inbox item ${item.id}.` });
+          continue;
+        }
         if (options.nonInteractive) return { reason: "human_input_required", nextAction: `Classify Inbox item ${item.id}.` };
-        await emit({ type: "classification", kind: "classification.started", phase: "classification", inboxId: item.id, message: `Classifying ${item.id}.` });
-        const onProgress = async (progress: import("../execution/execution-adapter.js").AdapterProgress) => { await emit({ type: "status", kind: progress.kind, phase: progress.phase, severity: progress.severity, inboxId: item.id, message: progress.message, elapsedMs: progress.elapsedMs }, { durable: progress.durable === true }); };
-        try {
-          classification = validateClassification(await classifier(item, options.signal, onProgress));
-        } catch (error) {
-          if (!canRepairClassification(error)) throw error;
-          repaired = true;
-          await emit({ type: "status", kind: "classification.repairing", phase: "classification", inboxId: item.id, severity: "warning", message: "The classifier returned an incomplete proposal; retrying once with the missing contract details." });
-          classification = validateClassification(await classifier(item, options.signal, onProgress, classificationErrorSummary(error)));
-        }
-        await this.repo.recordClassification(item, classification, runId);
-      } catch (error) {
-        const nextAction = classificationRecoveryAction();
-        result.actions.push({ kind: "inbox", id: item.id, action: "classification_invalid", nextAction });
-        await emit({ type: "gate", kind: "gate.reached", phase: "classification", inboxId: item.id, severity: "error", message: formatClassificationError(error, repaired), nextAction });
-        return { reason: "classification_failed", nextAction };
-      }
-      await emit({ type: "classification", kind: "classification.finished", phase: "classification", inboxId: item.id, message: `Classified ${item.id} as ${classification.route}/${classification.size}.` });
 
-      if (classification.route === "ask_direct") {
-        const field = classification.clarification!.field;
-        const question = clarificationQuestion(field);
-        const nextAction = `Answer with \`forgium inbox answer ${item.id} <answer>\`, then run \`forgium run\` again.`;
-        if (answeredClarifications.has(item.id) || options.nonInteractive || !options.answerClarification) {
-          await this.repo.requestInboxClarification(item.id, field);
-          await emit({ type: "gate", kind: "clarification.awaiting_answer", phase: "classification", inboxId: item.id, severity: "warning", message: `One answer is needed before Work can be created: ${question}`, nextAction });
-          result.actions.push({ kind: "inbox", id: item.id, action: "needs_clarification", nextAction });
-          return { reason: "human_input_required", nextAction };
-        }
-        const answer = (await options.answerClarification(item, question))?.trim();
-        if (!answer) {
-          await this.repo.requestInboxClarification(item.id, field);
-          await emit({ type: "gate", kind: "clarification.awaiting_answer", phase: "classification", inboxId: item.id, severity: "warning", message: `One answer is needed before Work can be created: ${question}`, nextAction });
-          result.actions.push({ kind: "inbox", id: item.id, action: "needs_clarification", nextAction });
-          return { reason: "human_input_required", nextAction };
-        }
-        answeredClarifications.add(item.id);
-        await this.repo.requestInboxClarification(item.id, field);
-        await this.repo.answerInboxClarification(item.id, answer);
-        await emit({ type: "classification", kind: "clarification.answered", phase: "classification", inboxId: item.id, message: `Received the clarification needed for ${item.id}.` });
-        return this.processInbox(result, options, emit, runId, answeredClarifications);
-      }
+        let reclassify = true;
+        while (reclassify) {
+          reclassify = false;
+          let classification: Classification;
+          let repaired = false;
+          try {
+            await emit({ type: "classification", kind: "classification.started", phase: "classification", inboxId: item.id, message: `Classifying ${item.id}.` });
+            const onProgress = async (progress: import("../execution/execution-adapter.js").AdapterProgress) => { await emit({ type: "status", kind: progress.kind, phase: progress.phase, severity: progress.severity, inboxId: item.id, message: progress.message, elapsedMs: progress.elapsedMs }, { durable: progress.durable === true }); };
+            try {
+              classification = validateClassification(await classifier(item, options.signal, onProgress));
+            } catch (error) {
+              if (!canRepairClassification(error)) throw error;
+              repaired = true;
+              await emit({ type: "status", kind: "classification.repairing", phase: "classification", inboxId: item.id, severity: "warning", message: "The classifier returned an incomplete proposal; retrying once with the missing contract details." });
+              classification = validateClassification(await classifier(item, options.signal, onProgress, classificationErrorSummary(error)));
+            }
+            await this.repo.recordClassification(item, classification, runId);
+          } catch (error) {
+            const nextAction = classificationRecoveryAction();
+            result.actions.push({ kind: "inbox", id: item.id, action: "classification_invalid", nextAction });
+            await emit({ type: "gate", kind: "gate.reached", phase: "classification", inboxId: item.id, severity: "error", message: formatClassificationError(error, repaired), nextAction });
+            return { reason: "classification_failed", nextAction };
+          }
+          await emit({ type: "classification", kind: "classification.finished", phase: "classification", inboxId: item.id, message: `Classified ${item.id} as ${classification.route}/${classification.size}.` });
 
-      const automatic = isAutomaticClassification(classification);
-      let choice: HumanClassificationChoice = automatic ? "direct" : "quit";
-      if (!automatic) {
-        choice = options.chooseClassification && !options.nonInteractive ? await options.chooseClassification(item, classification) : "quit";
-        if (choice === "quit") return { reason: classification.route === "split" ? "split_required" : "human_input_required", nextAction: `Choose direct, Spec, ADR, split, defer, or reject for ${item.id}.` };
+          if (classification.route === "ask_direct") {
+            const field = classification.clarification!.field;
+            const question = clarificationQuestion(field);
+            const nextAction = `Answer with \`forgium inbox answer ${item.id} <answer>\`, then run \`forgium run\` again.`;
+            if (answeredClarifications.has(item.id) || !options.answerClarification) {
+              await this.repo.requestInboxClarificationItem(item, field);
+              await emit({ type: "gate", kind: "clarification.awaiting_answer", phase: "classification", inboxId: item.id, severity: "warning", message: `One answer is needed before Work can be created: ${question}`, nextAction });
+              result.actions.push({ kind: "inbox", id: item.id, action: "needs_clarification", nextAction });
+              return { reason: "human_input_required", nextAction };
+            }
+            const answer = (await options.answerClarification(item, question))?.trim();
+            if (!answer) {
+              await this.repo.requestInboxClarificationItem(item, field);
+              await emit({ type: "gate", kind: "clarification.awaiting_answer", phase: "classification", inboxId: item.id, severity: "warning", message: `One answer is needed before Work can be created: ${question}`, nextAction });
+              result.actions.push({ kind: "inbox", id: item.id, action: "needs_clarification", nextAction });
+              return { reason: "human_input_required", nextAction };
+            }
+            answeredClarifications.add(item.id);
+            const pending = await this.repo.requestInboxClarificationItem(item, field);
+            item = await this.repo.answerInboxClarificationItem(pending, answer);
+            await emit({ type: "classification", kind: "clarification.answered", phase: "classification", inboxId: item.id, message: `Received the clarification needed for ${item.id}.` });
+            reclassify = true;
+            continue;
+          }
+
+          const automatic = isAutomaticClassification(classification);
+          let choice: HumanClassificationChoice = automatic ? "direct" : "quit";
+          if (!automatic) {
+            choice = options.chooseClassification && !options.nonInteractive ? await options.chooseClassification(item, classification) : "quit";
+            if (choice === "quit") return { reason: classification.route === "split" ? "split_required" : "human_input_required", nextAction: `Choose direct, Spec, ADR, split, defer, or reject for ${item.id}.` };
+          }
+          if (choice === "direct") {
+            if (!hasVerificationPlan(classification)) throw new Error("Direct Work creation requires a verification plan.");
+            const feature = await this.repo.createFeatureFromInboxItem(item, { ...classification.proposed, verification: classification.proposed.verification, classification });
+            result.actions.push({ kind: "inbox", id: item.id, action: `created:${feature.id}` });
+            await emit({ type: "transition", kind: "work.transitioned", phase: "classification", inboxId: item.id, workId: feature.id, state: "ready", message: `Promoted ${item.id} to ready Work ${feature.id}.` });
+          } else if (choice === "spec" || choice === "adr") {
+            const updated = await this.repo.requireDefinitionForInboxItem(item, choice);
+            result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition", nextAction: `Complete ${updated.definitionRef}.`, definitionRef: updated.definitionRef, definitionKind: updated.definitionKind });
+            return { reason: "human_definition_required", nextAction: `Complete ${updated.definitionRef} and run again.` };
+          } else if (choice === "defer") {
+            await this.repo.deferInboxItem(item);
+            result.actions.push({ kind: "inbox", id: item.id, action: "deferred" });
+          } else if (choice === "reject") {
+            await this.repo.rejectInboxItem(item);
+            result.actions.push({ kind: "inbox", id: item.id, action: "rejected" });
+          } else {
+            return { reason: "split_required", nextAction: `Split ${item.id} into smaller Work items and confirm the proposal.` };
+          }
+        }
       }
-      if (options.dryRun) continue;
-      if (choice === "direct") {
-        if (!hasVerificationPlan(classification)) throw new Error("Direct Work creation requires a verification plan.");
-        const feature = await this.repo.createFeatureFromInbox(item.id, { ...classification.proposed, verification: classification.proposed.verification, classification });
-        result.actions.push({ kind: "inbox", id: item.id, action: `created:${feature.id}` });
-        await emit({ type: "transition", kind: "work.transitioned", phase: "classification", inboxId: item.id, workId: feature.id, state: "ready", message: `Promoted ${item.id} to ready Work ${feature.id}.` });
-      } else if (choice === "spec" || choice === "adr") {
-        const updated = await this.repo.requireDefinitionForInbox(item.id, choice);
-        result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition", nextAction: `Complete ${updated.definitionRef}.`, definitionRef: updated.definitionRef, definitionKind: updated.definitionKind });
-        return { reason: "human_definition_required", nextAction: `Complete ${updated.definitionRef} and run again.` };
-      } else if (choice === "defer") {
-        await this.repo.deferInbox(item.id);
-        result.actions.push({ kind: "inbox", id: item.id, action: "deferred" });
-      } else if (choice === "reject") {
-        await this.repo.rejectInbox(item.id);
-        result.actions.push({ kind: "inbox", id: item.id, action: "rejected" });
-      } else {
-        return { reason: "split_required", nextAction: `Split ${item.id} into smaller Work items and confirm the proposal.` };
-      }
+      return null;
+    } finally {
+      piClassifier?.close();
     }
-    return null;
   }
 
   private async implement(feature: Feature, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>, runId: string) {
