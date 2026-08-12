@@ -26,10 +26,12 @@ async function fakePiWithClassification(root: string, classification: unknown): 
   await fs.writeFile(command, [
     "#!/usr/bin/env node",
     "if (process.argv.includes('--version')) process.exit(0);",
-    "process.stdin.on('data', () => {",
+    "process.stdin.on('data', (chunk) => { for (const line of chunk.toString().split('\\n')) {",
+    "  if (!line.trim()) continue; const request = JSON.parse(line);",
+    "  if (request.type === 'new_session') { process.stdout.write(JSON.stringify({ type: 'response', id: request.id, command: 'new_session', success: true, data: { cancelled: false } }) + '\\n'); continue; }",
     `  process.stdout.write(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: ${JSON.stringify(assistantText)} }] }] }) + '\\n');`,
     "  process.stdout.write(JSON.stringify({ type: 'agent_settled' }) + '\\n');",
-    "});",
+    "} });",
   ].join("\n"));
   await fs.chmod(command, 0o755);
   return command;
@@ -108,8 +110,8 @@ describe("forgium run", () => {
     await expect(repo.getFeature(second.id)).resolves.toMatchObject({ state: "doing" });
   });
 
-  it("fails closed and renders a classification gate without inventing a definition", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-run-invalid-classification-"));
+  it("auto-generates verification when classifier returns empty commands", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-run-auto-verification-"));
     expect((await runCli(root, ["init", "--json"])).code).toBe(0);
     expect((await runCli(root, ["capture", "Create a names file", "--json"])).code).toBe(0);
     const fakePi = await fakePiWithClassification(root, {
@@ -132,21 +134,10 @@ describe("forgium run", () => {
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Forgium status after run");
-    expect(result.stdout).toContain("captured: 1");
-    expect(result.stdout).toContain("Forgium could not create a complete Work proposal after one automatic repair attempt. Your Inbox is unchanged.");
-    expect(result.stdout).toContain("Next: Run `forgium triage` to create the Work manually. Your Inbox has not been changed.");
-    expect(result.stdout).not.toContain("Definition required:");
-    const inbox = JSON.parse((await runCli(root, ["inbox", "--json"])).stdout);
-    expect(inbox).toMatchObject([{ status: "captured" }]);
-    const events = (await fs.readFile(path.join(root, "product", "events", `${new Date().toISOString().slice(0, 10)}.ndjson`), "utf8"))
-      .trim().split("\n").map((line) => JSON.parse(line));
-    expect(events).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: "gate",
-        message: expect.stringContaining("Forgium could not create a complete Work proposal after one automatic repair attempt."),
-        nextAction: expect.stringContaining("Run `forgium triage` to create the Work manually"),
-      }),
-    ]));
+    // With auto-generated verification, the classification should succeed
+    // and the inbox item should be promoted to work
+    expect(result.stdout).toContain("captured: 0");
+    expect(result.stdout).not.toContain("classification_failed");
   }, 15_000);
 
 });
