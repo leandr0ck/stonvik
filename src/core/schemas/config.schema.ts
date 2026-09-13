@@ -1,48 +1,19 @@
 import { z } from "zod";
 
-/**
- * Schema for stonvik.json configuration file.
- *
- * All fields are optional. Environment variables override file values.
- * The file lives at the repository root (next to .git).
- */
-export const StonvikConfigSchema = z.object({
-  pi: z
-    .object({
-      /** Command or path to the Pi binary. Default: "pi". */
-      command: z.string().min(1).optional(),
-      /** Model pattern for classification (lightweight, fast). Supports "provider/id" format. */
-      classificationModel: z.string().min(1).optional(),
-      /** Model pattern for implementation (full-featured). Supports "provider/id" format. */
-      implementationModel: z.string().min(1).optional(),
-      /** Model pattern for review (independent reviewer). Supports "provider/id" format. */
-      reviewModel: z.string().min(1).optional(),
-    })
-    .optional(),
-  classification: z
-    .object({
-      /** Timeout in milliseconds for classification. Default: 120000. */
-      timeoutMs: z.number().int().positive().optional(),
-      /** Heartbeat interval in milliseconds. Default: 10000. */
-      heartbeatIntervalMs: z.number().int().positive().optional(),
-    })
-    .optional(),
-  execution: z
-    .object({
-      /** Timeout in milliseconds for implementation. Default: 1800000 (30 min). */
-      timeoutMs: z.number().int().positive().optional(),
-      /** Heartbeat interval in milliseconds. Default: 10000. */
-      heartbeatIntervalMs: z.number().int().positive().optional(),
-    })
-    .optional(),
-  review: z
-    .object({
-      /** Timeout in milliseconds for review. Default: 120000. */
-      timeoutMs: z.number().int().positive().optional(),
-      /** Heartbeat interval in milliseconds. Default: 10000. */
-      heartbeatIntervalMs: z.number().int().positive().optional(),
-    })
-    .optional(),
-});
+export const RoutingPolicySchema = z.object({
+  requireSpecWhen: z.object({ risks: z.array(z.string().min(1)).optional() }).optional(),
+  direct: z.object({
+    maximumSize: z.enum(["XS", "S", "M", "L", "XL"]).optional(),
+    maximumTouchedFiles: z.number().int().positive().optional(),
+  }).optional(),
+  ambiguity: z.object({
+    requireRole: z.enum(["triager", "implementer", "specifier", "verifier", "reviewer", "product-owner"]).optional(),
+  }).optional(),
+}).strict();
 
-export type StonvikConfig = z.infer<typeof StonvikConfigSchema>;
+/** Only configuration understood by the agent-neutral core. */
+export const CoreConfigSchema = z.object({
+  routing: RoutingPolicySchema.optional(),
+}).strict();
+
+export type CoreConfigPayload = z.infer<typeof CoreConfigSchema>;

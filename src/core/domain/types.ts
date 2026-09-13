@@ -10,6 +10,31 @@ export interface InboxClarification {
   answer?: string;
 }
 
+export type ActorType = "human" | "agent" | "ci" | "process";
+export type ActorRole = "triager" | "implementer" | "specifier" | "verifier" | "reviewer" | "product-owner";
+
+export interface ActorRef {
+  type: ActorType;
+  name: string;
+  role?: ActorRole;
+  version?: string;
+}
+
+export interface RoutingDecision {
+  schemaVersion: 1;
+  inboxId: string;
+  route: "direct" | "spec-first";
+  signals: {
+    size?: WorkSize;
+    estimatedTouchedFiles?: number;
+    risks: string[];
+  };
+  rationale: string[];
+  proposedBy?: ActorRef;
+  decidedBy: ActorRef;
+  created: string;
+}
+
 export interface InboxItem {
   id: string;
   source: string;
@@ -23,8 +48,11 @@ export interface InboxItem {
   definitionKind?: "spec" | "adr";
   featureRef?: string;
   classification?: Classification;
+  routingDecision?: RoutingDecision;
 }
 
+export type WorkKind = "implementation" | "specification";
+export type PreparationRoute = "direct" | "spec-first";
 export type WorkSize = "XS" | "S" | "M" | "L" | "XL";
 export type ClassificationRoute = "auto_direct" | "ask_direct" | "ask_spec" | "ask_adr" | "split";
 export type ClassificationRisk = "public_api" | "persistence" | "security" | "external_integration" | "multi_package" | "unknown_impact";
@@ -49,6 +77,8 @@ export interface Classification {
 export interface FeatureManifest {
   schemaVersion: 1;
   id: string;
+  /** Optional when reading legacy manifests; new manifests always persist it. */
+  kind: WorkKind;
   title: string;
   created: string;
   source?: { type: string; ref: string };
@@ -57,6 +87,11 @@ export interface FeatureManifest {
   constraints?: string[];
   verification: VerificationPolicy;
   classification?: Classification;
+  routingDecision?: RoutingDecision;
+  /** Stable Work ID or repository reference for the approved specification. */
+  specificationRef?: string;
+  routingDecisionRef?: string;
+  deliverables?: string[];
 }
 
 export interface VerificationCommand {
@@ -76,11 +111,66 @@ export interface VerificationPolicy {
   review?: "required";
 }
 
+export interface WorkHandoff {
+  schemaVersion: 1;
+  generated: string;
+  work: {
+    id: string;
+    kind: WorkKind;
+    title: string;
+    goal: string;
+    acceptance: string[];
+    constraints: string[];
+    source?: { type: string; ref: string };
+    specificationRef?: string;
+  };
+  execution: {
+    allowedPaths?: string[];
+    verification: VerificationPolicy;
+  };
+  protocol: {
+    reportCommand: string;
+    requestReviewCommand: string;
+  };
+}
+
+export interface ExternalExecutionEvidence {
+  criterion: string;
+  kind: string;
+  ref?: string;
+}
+
+export interface ExternalExecutionReport {
+  schemaVersion: 1;
+  actor: ActorRef;
+  outcome: "completed" | "blocked" | "needs_human" | "cancelled";
+  summary: string;
+  artifacts?: string[];
+  evidence?: ExternalExecutionEvidence[];
+  details?: Record<string, unknown>;
+}
+
+export interface WorkClaim {
+  schemaVersion: 1;
+  workId: string;
+  runId: string;
+  actor: ActorRef;
+  claimedAt: string;
+  host: string;
+  pid: number;
+}
+
+export interface RoutingPolicy {
+  requireSpecWhen: { risks: string[] };
+  direct: { maximumSize: WorkSize; maximumTouchedFiles: number };
+  ambiguity: { requireRole: ActorRole };
+}
+
 export type ReceiptKind = "execution" | "verification" | "review" | "handoff";
 export type VerificationOutcome = "passed" | "failed" | "manual_required" | "not_configured" | "cancelled";
 export type ReviewDecision = "approved" | "changes_requested" | "blocked" | "needs_human";
 
-export interface ReceiptActor { type: string; name: string; version?: string }
+export interface ReceiptActor { type: string; name: string; role?: ActorRole; version?: string }
 export interface ReceiptFeatureRef { id: string; manifestPath: string }
 export interface ReceiptBase {
   schemaVersion: 1;
@@ -137,6 +227,7 @@ export interface ExecutionReceipt extends ReceiptBase {
   outcome: string;
   engine?: string;
   artifacts?: string[];
+  evidence?: ExternalExecutionEvidence[];
   details?: Record<string, unknown>;
 }
 
@@ -185,6 +276,7 @@ export interface CaptureInput { text: string; source?: string }
 export interface CreateFeatureInput {
   id?: string;
   slug?: string;
+  kind?: WorkKind;
   title: string;
   goal: string;
   acceptance: string[];
@@ -192,6 +284,12 @@ export interface CreateFeatureInput {
   verification: VerificationPolicy;
   classification?: Classification;
   source?: { type: string; ref: string };
+  routingDecision?: RoutingDecision;
+  routingDecisionRef?: string;
+  specificationRef?: string;
+  deliverables?: string[];
+  /** Used by the spec-first preparation path to stage the document atomically. */
+  specDocument?: string;
 }
 
 export interface WorkReviewFinding {

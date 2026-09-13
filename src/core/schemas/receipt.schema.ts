@@ -7,7 +7,7 @@ const ReceiptBaseSchema = z.object({
   created: z.string().datetime({ offset: true }),
   feature: z.object({ id: z.string().min(1), manifestPath: z.string().min(1) }),
   runId: z.string().min(1),
-  actor: z.object({ type: z.string().min(1), name: z.string().min(1), version: z.string().optional() }),
+  actor: z.object({ type: z.string().min(1), name: z.string().min(1), role: z.enum(["triager", "implementer", "specifier", "verifier", "reviewer", "product-owner"]).optional(), version: z.string().optional() }),
   outcome: z.string().min(1),
   summary: z.string().min(1)
 });
@@ -50,6 +50,7 @@ const ExecutionReceiptSchema = ReceiptBaseSchema.extend({
   kind: z.literal("execution"),
   engine: z.string().optional(),
   artifacts: z.array(z.string().min(1)).optional(),
+  evidence: z.array(z.object({ criterion: z.string().min(1), kind: z.string().min(1), ref: z.string().min(1).optional() }).strict()).optional(),
   details: z.record(z.unknown()).optional()
 });
 

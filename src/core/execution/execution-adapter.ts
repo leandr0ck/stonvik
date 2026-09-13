@@ -1,4 +1,4 @@
-import type { ExecutionProfile, Feature } from "../domain/types.js";
+import type { ExecutionProfile, Feature, WorkReviewDecision } from "../domain/types.js";
 
 export type ExecutionOutcome = "completed" | "verification_failed" | "blocked" | "needs_human" | "cancelled";
 
@@ -37,6 +37,22 @@ export interface ExecutionAdapter {
   supports(profile: ExecutionProfile): boolean;
   isAvailable(request: ExecutionRequest): Promise<boolean>;
   execute(request: ExecutionRequest): Promise<ExecutionResult>;
+}
+
+/** Neutral review request supplied to any independent review integration. */
+export interface WorkReviewRequest {
+  root: string;
+  feature: Feature;
+  runId: string;
+  receipts: unknown[];
+  verification: unknown[];
+  signal?: AbortSignal;
+  onProgress?: AdapterProgressCallback;
+}
+
+export interface WorkReviewAdapter {
+  readonly id: string;
+  review(request: WorkReviewRequest): Promise<WorkReviewDecision>;
 }
 
 export class ExecutionAdapterRegistry {

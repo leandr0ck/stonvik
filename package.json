@@ -1,6 +1,6 @@
 {
   "name": "stonvik",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Repository-native workflow engine for software development agents.",
   "type": "module",
   "bin": {
@@ -8,7 +8,10 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "docs/public",
+    "skills"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

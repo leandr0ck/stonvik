@@ -1,19 +1,29 @@
-import fs from "node:fs/promises";
+import fs, { type FileHandle } from "node:fs/promises";
 import fssync from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { exec as execCallback } from "node:child_process";
 import { promisify } from "node:util";
 import YAML from "yaml";
-import type { CaptureInput, ClarificationField, Classification, CreateFeatureInput, ExecutionProfile, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, RunEvent, ValidationReport, VerificationReceipt } from "../domain/types.js";
+import type { ActorRef, CaptureInput, ClarificationField, Classification, CreateFeatureInput, ExecutionProfile, ExternalExecutionEvidence, ExternalExecutionReport, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, RoutingDecision, RoutingPolicy, RunEvent, ValidationReport, VerificationReceipt, WorkHandoff, WorkKind, WorkClaim } from "../domain/types.js";
 import { FEATURE_STATES } from "../domain/types.js";
-import { FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, StonvikNotInitializedError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, LoopAlreadyRunningError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError } from "../errors/stonvik-errors.js";
+import { ActorInvalidError, FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, StonvikNotInitializedError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, LoopAlreadyRunningError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError, WorkClaimConflictError, WorkReportInvalidError, SpecificationInvalidError, SpecificationNotApprovedError, ReviewActorInvalidError, ReviewSelfApprovalError } from "../errors/stonvik-errors.js";
 import { InboxFrontmatterSchema } from "../schemas/inbox.schema.js";
 import { ManifestSchema } from "../schemas/manifest.schema.js";
 import { ReceiptSchema } from "../schemas/receipt.schema.js";
 import { DefinitionDocumentSchema, DefinitionMetadataSchema } from "../schemas/definition.schema.js";
 import { ClassificationReceiptSchema } from "../schemas/classification-receipt.schema.js";
 import { RunEventSchema } from "../schemas/run-event.schema.js";
+import { ActorRefSchema } from "../schemas/actor.schema.js";
+import { RoutingDecisionSchema } from "../schemas/routing.schema.js";
+import { ExternalExecutionReportSchema } from "../schemas/external-execution-report.schema.js";
+import { WorkClaimSchema } from "../schemas/work-claim.schema.js";
+import { WorkHandoffSchema } from "../schemas/handoff.schema.js";
+import { routingPolicyFromConfig, buildRoutingDecision, validateRoutingDecisionShape, type RoutingSignalOverrides } from "../services/routing.js";
+import { createWorkHandoff } from "../services/work-handoff.js";
+import { deriveImplementationFromSpecification, renderSpecificationTemplate, validateSpecificationDocument } from "../services/specification.js";
+import { loadCoreConfig } from "../services/config.js";
+import { actorKey, sameActor } from "../services/actors.js";
 import { isoNow, shortId, slugify, timestampForFile } from "../services/id.js";
 import { validateClassification } from "../services/classification.js";
 import { specFlowCommandsForSpec } from "../services/spec-flow-commands.js";
@@ -343,9 +353,20 @@ export class FilesystemStonvikRepository {
     const id = input.id ?? `feature-${slug}`;
     const featurePath = this.paths.featureDir("ready", slug);
     if (await this.featureIdExists(id) || await exists(featurePath)) throw new FeatureAlreadyExistsError(id);
+    const kind = input.kind ?? "implementation";
+    if (kind === "specification" && input.specDocument === undefined) throw new SpecificationInvalidError("Specification Work requires a spec.md document.");
+    if (kind === "specification" && input.verification.review !== "required") throw new SpecificationInvalidError("Specification Work requires an explicit review gate.");
+    let routingDecision: RoutingDecision | undefined;
+    try {
+      routingDecision = input.routingDecision ? RoutingDecisionSchema.parse(input.routingDecision) as RoutingDecision : undefined;
+    } catch (error) {
+      throw new InvalidManifestError(`Invalid routing decision: ${String((error as Error).message)}`);
+    }
+    const routingDecisionRef = routingDecision ? input.routingDecisionRef ?? "routing-decision.yaml" : input.routingDecisionRef;
     const manifest: FeatureManifest = {
       schemaVersion: 1,
       id,
+      kind,
       title: input.title,
       created: isoNow(),
       source: input.source,
@@ -354,24 +375,335 @@ export class FilesystemStonvikRepository {
       constraints: input.constraints,
       verification: input.verification,
       classification: input.classification,
+      routingDecision,
+      routingDecisionRef,
+      specificationRef: input.specificationRef,
+      deliverables: input.deliverables ?? (kind === "specification" ? ["spec.md"] : undefined),
     };
     try {
       if (manifest.classification) validateClassification(manifest.classification);
+      if (manifest.routingDecision) validateRoutingDecisionShape(manifest.routingDecision);
     } catch (error) {
-      throw new InvalidManifestError(`Invalid classification: ${String((error as Error).message)}`);
+      throw new InvalidManifestError(`Invalid Work metadata: ${String((error as Error).message)}`);
     }
     const parsed = ManifestSchema.safeParse(manifest);
     if (!parsed.success) throw new InvalidManifestError(parsed.error.message);
+    const normalizedManifest = parsed.data as FeatureManifest;
     const staging = path.join(this.paths.featureStateDir("ready"), `.creating-${slug}-${process.pid}-${shortId()}`);
     await fs.mkdir(staging, { recursive: false });
     try {
-      await this.writeFileAtomic(path.join(staging, "manifest.yaml"), YAML.stringify(manifest));
+      await this.writeFileAtomic(path.join(staging, "manifest.yaml"), YAML.stringify(normalizedManifest));
+      if (input.specDocument !== undefined) await this.writeFileAtomic(path.join(staging, "spec.md"), input.specDocument);
+      if (routingDecision) {
+        const routingRef = routingDecisionRef ?? "routing-decision.yaml";
+        const routingPath = path.resolve(staging, routingRef);
+        if (!isSafeRepositoryPath(routingRef) || !isWithin(staging, routingPath)) throw new InvalidManifestError("Routing decision reference must stay inside the Work.");
+        await this.writeFileAtomic(routingPath, YAML.stringify(routingDecision));
+      }
       await fs.rename(staging, featurePath);
     } catch (error) {
       await fs.rm(staging, { recursive: true, force: true });
       throw error;
     }
     return this.readFeature(featurePath, "ready");
+  }
+
+  /** Prepare a captured Inbox item without invoking an agent or interpreting a session. */
+  async prepareWork(
+    inboxId: string,
+    options: {
+      route: "direct" | "spec-first";
+      actor: ActorRef;
+      signals?: RoutingSignalOverrides;
+      policy?: RoutingPolicy;
+    },
+  ): Promise<Feature> {
+    const item = await this.requireInbox(inboxId);
+    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${inboxId}`);
+    const actor = this.assertActor(options.actor, "triager");
+    const config = await loadCoreConfig(this.root);
+    const decision = buildRoutingDecision(item, options.route, actor, options.signals, options.policy ?? routingPolicyFromConfig(config));
+    const routedItem = { ...item, routingDecision: decision };
+    await this.writeInboxItem(routedItem);
+
+    const literalPaths = extractRepositoryPaths(`${item.title}\n${item.body ?? ""}`);
+    const verification = directVerificationPolicy(literalPaths);
+    const acceptance = [item.body?.trim() || `The requested Work \`${item.title}\` is implemented.`];
+    try {
+      if (options.route === "spec-first") {
+        const title = `${item.title} specification`;
+        return await this.createFeatureFromInboxItem(routedItem, {
+          id: `feature-${slugify(item.title)}-spec`,
+          slug: `${slugify(item.title)}-spec`,
+          kind: "specification",
+          title,
+          goal: `Produce an approved specification for ${item.title}.`,
+          acceptance: ["spec.md contains non-empty problem, scope, acceptance, constraints, and verification sections."],
+          constraints: ["The specification must resolve the captured intent without implementing it."],
+          verification: { commands: [{ name: "specification-structure", run: "true" }], review: "required" },
+          deliverables: ["spec.md"],
+          specDocument: renderSpecificationTemplate(item.title, item.body),
+          routingDecision: decision,
+          routingDecisionRef: `provenance/routing/${item.id}.yaml`,
+        });
+      }
+
+      return await this.createFeatureFromInboxItem(routedItem, {
+        kind: "implementation",
+        title: item.title,
+        goal: item.body?.trim() || item.title,
+        acceptance,
+        verification,
+        routingDecision: decision,
+        routingDecisionRef: `provenance/routing/${item.id}.yaml`,
+      });
+    } catch (error) {
+      // Do not leave a routing decision on an Inbox item when Work creation
+      // failed; the decision is durable again only with the promoted Work.
+      if (await exists(item.path)) await this.writeInboxItem(item);
+      throw error;
+    }
+  }
+
+  async prepareInbox(inboxId: string, options: Parameters<FilesystemStonvikRepository["prepareWork"]>[1]): Promise<Feature> {
+    return this.prepareWork(inboxId, options);
+  }
+
+  /** Claim ready Work, or resume unclaimed doing Work after a failed/reviewed attempt. */
+  async startWork(id: string, actorInput: ActorRef, runId?: string): Promise<Feature> {
+    const actor = this.assertActor(actorInput, "implementer");
+    const current = await this.requireFeature(id);
+    if (current.state !== "ready" && current.state !== "doing") throw new InvalidStateTransitionError(current.state, "doing");
+    const claimPath = this.paths.claimPath(current.id);
+    if (current.state === "doing") {
+      const existing = await this.readWorkClaim(claimPath);
+      if (existing) {
+        if (isLiveClaim(existing)) {
+          if (!sameActor(existing.actor, actor)) throw new WorkClaimConflictError(`Work ${id} is claimed by ${actorKey(existing.actor)}.`);
+          return current;
+        }
+        throw new WorkClaimConflictError(`Work ${id} has a stale claim. Use recovery explicitly before claiming it again.`);
+      }
+    }
+
+    const claim: WorkClaim = {
+      schemaVersion: 1,
+      workId: current.id,
+      runId: runId ?? `run-${timestampForFile()}-${shortId()}`,
+      actor,
+      claimedAt: isoNow(),
+      host: os.hostname(),
+      pid: process.pid,
+    };
+    WorkClaimSchema.parse(claim);
+    await fs.mkdir(this.paths.claims, { recursive: true });
+    let handle: FileHandle | undefined;
+    try {
+      handle = await fs.open(claimPath, "wx");
+      await handle.writeFile(JSON.stringify(claim, null, 2));
+      await handle.close();
+      handle = undefined;
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new WorkClaimConflictError(`Work ${id} is already claimed.`);
+      throw error;
+    }
+
+    let doing = current;
+    let transitioned = false;
+    try {
+      if (current.state === "ready") {
+        doing = await this.transition(id, "doing");
+        transitioned = true;
+      }
+      const receipt = this.createActorExecutionReceipt(doing, claim.runId, actor, "started", `Work claimed by ${actorKey(actor)}.`);
+      await this.persistReceipt(doing, receipt);
+    } catch (error) {
+      await fs.rm(claimPath, { force: true });
+      if (transitioned && await exists(doing.path) && !(await exists(current.path))) await fs.rename(doing.path, current.path);
+      throw error;
+    }
+    return doing;
+  }
+
+  async getWorkClaim(id: string): Promise<WorkClaim | null> {
+    const feature = await this.requireFeature(id);
+    const claim = await this.readWorkClaim(this.paths.claimPath(feature.id));
+    return claim;
+  }
+
+  /** Reclaim a doing Work only after its previous local process is no longer live. */
+  async recoverWork(id: string, actorInput: ActorRef, runId?: string): Promise<Feature> {
+    const actor = this.assertActor(actorInput, "implementer");
+    const feature = await this.requireFeature(id);
+    if (feature.state !== "doing") throw new InvalidStateTransitionError(feature.state, "doing");
+    const claimPath = this.paths.claimPath(feature.id);
+    const previous = await this.readWorkClaim(claimPath);
+    const previousRaw = await fs.readFile(claimPath, "utf8").catch(() => undefined);
+    if (previous && isLiveClaim(previous) && !sameActor(previous.actor, actor)) {
+      throw new WorkClaimConflictError(`Work ${id} is still claimed by ${actorKey(previous.actor)}.`);
+    }
+    const claim: WorkClaim = {
+      schemaVersion: 1,
+      workId: feature.id,
+      runId: runId ?? `recovery-${timestampForFile()}-${shortId()}`,
+      actor,
+      claimedAt: isoNow(),
+      host: os.hostname(),
+      pid: process.pid,
+    };
+    WorkClaimSchema.parse(claim);
+    await this.writeFileAtomic(claimPath, JSON.stringify(claim, null, 2));
+    try {
+      const receipt = this.createActorExecutionReceipt(feature, claim.runId, actor, "recovered", `Work recovered by ${actorKey(actor)}.`);
+      await this.persistReceipt(feature, receipt);
+    } catch (error) {
+      if (previousRaw !== undefined) await this.writeFileAtomic(claimPath, previousRaw);
+      else await fs.rm(claimPath, { force: true });
+      throw error;
+    }
+    return feature;
+  }
+
+  async createWorkHandoff(id: string): Promise<WorkHandoff> {
+    const feature = await this.requireFeature(id);
+    return WorkHandoffSchema.parse(createWorkHandoff(feature)) as WorkHandoff;
+  }
+
+  async handoffWork(id: string): Promise<WorkHandoff> {
+    return this.createWorkHandoff(id);
+  }
+
+  /** Import a result produced by a human, agent, CI job, or local process. */
+  async recordExternalExecutionReport(
+    id: string,
+    reportInput: ExternalExecutionReport,
+    options: { runId?: string } = {},
+  ): Promise<{ feature: Feature; receipt: Receipt; nextAction: string }> {
+    const report = this.parseExternalExecutionReport(reportInput);
+    const feature = await this.requireFeature(id);
+    if (feature.state !== "doing") throw new WorkReportInvalidError(`Work ${id} must be doing before an execution report is imported.`);
+    const claim = await this.readWorkClaim(this.paths.claimPath(feature.id));
+    if (claim && !sameActor(claim.actor, report.actor)) throw new WorkClaimConflictError(`Execution report actor ${actorKey(report.actor)} does not match the Work claim owned by ${actorKey(claim.actor)}.`);
+    if (claim && options.runId && options.runId !== claim.runId) throw new WorkReportInvalidError(`Execution report run ID does not match the Work claim: ${claim.runId}.`);
+    this.validateExternalExecutionReferences(report, feature.path);
+    const runId = options.runId ?? claim?.runId ?? `run-${timestampForFile()}-${shortId()}`;
+    const execution = this.createActorExecutionReceipt(feature, runId, report.actor, report.outcome, report.summary, report.artifacts, report.evidence, report.details);
+    await this.persistReceipt(feature, execution);
+    await this.releaseWorkClaim(feature.id);
+
+    if (report.outcome === "blocked") {
+      const blocked = await this.transition(id, "blocked");
+      await fs.appendFile(path.join(blocked.path, "notes.md"), `\n## Blocked ${isoNow()}\n\n${report.summary.trim()}\n`);
+      const handoff = this.createHandoffReceipt(blocked, runId, "blocked", execution.id, report.summary);
+      await this.persistReceipt(blocked, handoff);
+      return { feature: blocked, receipt: execution, nextAction: `Resolve the blocker for ${id}.` };
+    }
+    if (report.outcome === "needs_human") {
+      const handoff = this.createHandoffReceipt(feature, runId, "needs_human", execution.id, report.summary);
+      await this.persistReceipt(feature, handoff);
+      return { feature, receipt: execution, nextAction: "Record the required human decision before continuing." };
+    }
+    if (report.outcome === "cancelled") {
+      const handoff = this.createHandoffReceipt(feature, runId, "cancelled", execution.id, report.summary);
+      await this.persistReceipt(feature, handoff);
+      return { feature, receipt: execution, nextAction: `Recover or restart Work ${id}.` };
+    }
+    return { feature, receipt: execution, nextAction: `Run \`stonvik verify ${id}\` before requesting independent review.` };
+  }
+
+  async reportWork(id: string, report: ExternalExecutionReport, options?: { runId?: string }): Promise<{ feature: Feature; receipt: Receipt; nextAction: string }> {
+    return this.recordExternalExecutionReport(id, report, options);
+  }
+
+  async importExecutionReport(id: string, report: ExternalExecutionReport, options?: { runId?: string }): Promise<{ feature: Feature; receipt: Receipt; nextAction: string }> {
+    return this.recordExternalExecutionReport(id, report, options);
+  }
+
+  /** The public verification path requires a completed external execution report. */
+  async verifyWork(id: string, options: { evidence?: ReceiptEvidence[]; runId?: string } = {}): Promise<VerificationReceipt> {
+    const feature = await this.requireFeature(id);
+    const receipts = await this.listReceipts(id);
+    const execution = [...receipts].reverse().find((receipt) => receipt.kind === "execution");
+    const latestReview = [...receipts].reverse().find((receipt) => receipt.kind === "review");
+    if (!execution || execution.outcome !== "completed" || (latestReview?.kind === "review" && latestReview.decision === "changes_requested" && latestReview.created > execution.created)) {
+      throw new WorkReportInvalidError(`A current completed execution report is required before verifying Work ${id}.`);
+    }
+    const reportEvidence = execution.kind === "execution"
+      ? (execution.evidence ?? []).map((evidence) => ({ ...evidence, status: "passed" as const }))
+      : [];
+    return this.verifyFeature(id, { ...options, evidence: options.evidence ?? reportEvidence });
+  }
+
+  /** Record an independent review; this path enforces the external lifecycle gates. */
+  async reviewWork(
+    id: string,
+    actorInput: ActorRef,
+    decision: ReviewDecision,
+    summary: string,
+    findings?: string[],
+    runId?: string,
+  ): Promise<Feature> {
+    const actor = this.assertActor(actorInput, "reviewer");
+    const feature = await this.requireFeature(id);
+    if (feature.state !== "review") throw new InvalidStateTransitionError(feature.state, "done");
+    const receipts = await this.listReceipts(id);
+    const execution = [...receipts].reverse().find((receipt) => receipt.kind === "execution" && receipt.outcome === "completed");
+    if (!execution) throw new ReviewActorInvalidError(`A completed external execution report is required before reviewing ${id}.`);
+    const verification = [...receipts].reverse().find((receipt) => receipt.kind === "verification");
+    if (!verification || verification.outcome !== "passed" || verification.created < execution.created) throw new ReviewActorInvalidError(`A current passing verification receipt is required before reviewing ${id}.`);
+    if (sameActor(execution.actor, actor)) throw new ReviewSelfApprovalError(`The reviewer ${actorKey(actor)} cannot approve the same Work execution.`);
+    const normalizedSummary = summary.trim();
+    if (!normalizedSummary) throw new ReviewActorInvalidError("Review summary cannot be empty.");
+    if (!["approved", "changes_requested", "blocked", "needs_human"].includes(decision)) throw new ReviewActorInvalidError(`Invalid review decision: ${decision}`);
+    const receipt = this.createActorReviewReceipt(feature, actor, decision, normalizedSummary, findings, runId);
+    await this.persistReceipt(feature, receipt);
+    if (decision === "needs_human") return feature;
+    const next = decision === "approved" ? "done" : decision === "changes_requested" ? "doing" : "blocked";
+    const updated = await this.transition(id, next);
+    if (next === "blocked") await fs.appendFile(path.join(updated.path, "notes.md"), `\n## Blocked ${isoNow()}\n\n${normalizedSummary}\n`);
+    await this.releaseWorkClaim(updated.id);
+    return updated;
+  }
+
+  async validateSpecification(id: string): Promise<ReturnType<typeof validateSpecificationDocument>> {
+    const feature = await this.requireFeature(id);
+    const documentPath = path.join(feature.path, "spec.md");
+    try {
+      const content = await fs.readFile(documentPath, "utf8");
+      return validateSpecificationDocument(content, path.relative(this.root, documentPath));
+    } catch {
+      return validateSpecificationDocument("", path.relative(this.root, documentPath));
+    }
+  }
+
+  async createImplementationFromSpecification(specificationId: string): Promise<Feature> {
+    const specification = await this.requireFeature(specificationId);
+    if ((specification.manifest.kind ?? "implementation") !== "specification" || specification.state !== "done") {
+      throw new SpecificationNotApprovedError(specificationId);
+    }
+    const receipts = await this.listReceipts(specificationId);
+    if (!receipts.some((receipt) => receipt.kind === "review" && receipt.decision === "approved")) throw new SpecificationNotApprovedError(specificationId);
+    const documentPath = path.join(specification.path, "spec.md");
+    if (!isWithin(specification.path, documentPath) || !(await exists(documentPath))) throw new SpecificationInvalidError(`Specification document is missing: ${documentPath}`);
+    const content = await fs.readFile(documentPath, "utf8");
+    const validation = validateSpecificationDocument(content, path.relative(this.root, documentPath));
+    if (!validation.valid) throw new SpecificationInvalidError(validation.issues.map((issue) => issue.message).join(" "));
+    const contract = deriveImplementationFromSpecification(specification.manifest, content);
+    const decision = specification.manifest.routingDecision;
+    return this.createFeature({
+      ...contract,
+      id: `feature-${slugify(contract.title)}`,
+      slug: slugify(contract.title),
+      kind: "implementation",
+      source: { type: "specification", ref: specification.id },
+      specificationRef: specification.id,
+      ...(decision ? { routingDecision: decision, routingDecisionRef: `provenance/routing/${specification.id}.yaml` } : {}),
+    });
+  }
+
+  async createFeatureFromSpec(specificationId: string): Promise<Feature> {
+    return this.createImplementationFromSpecification(specificationId);
   }
 
   async recordClassification(item: InboxItem, classification: Classification, runId: string): Promise<void> {
@@ -400,7 +732,13 @@ export class FilesystemStonvikRepository {
   async createFeatureFromInboxItem(item: InboxItem, input: Omit<CreateFeatureInput, "source">): Promise<Feature> {
     const current = await this.readInboxFile(item.path);
     if (current.id !== item.id || (current.status !== "captured" && current.status !== "needs_definition")) throw new InvalidInboxItemError(`Inbox item cannot create Work: ${item.id}`);
-    const feature = await this.createFeature({ ...input, source: { type: "inbox", ref: current.id } });
+    const feature = await this.createFeature({
+      ...input,
+      source: { type: "inbox", ref: current.id },
+      ...(input.routingDecision ?? current.routingDecision
+        ? { routingDecision: input.routingDecision ?? current.routingDecision, routingDecisionRef: input.routingDecisionRef ?? `provenance/routing/${current.id}.yaml` }
+        : {}),
+    });
     try {
       await this.moveInboxProvenance(current, feature, "promoted");
     } catch (error) {
@@ -452,8 +790,25 @@ export class FilesystemStonvikRepository {
     const checks: VerificationReceipt["checks"] = [];
     let evidence: ReceiptEvidence[] | undefined;
     let outcome: VerificationReceipt["outcome"] = "not_configured";
+    let specificationValid = true;
 
-    if (policy) {
+    if (feature.manifest.kind === "specification") {
+      const documentPath = path.join(feature.path, "spec.md");
+      const document = await fs.readFile(documentPath, "utf8").catch(() => "");
+      const specification = validateSpecificationDocument(document, path.relative(this.root, documentPath));
+      specificationValid = specification.valid;
+      checks.push({
+        name: "specification-structure",
+        command: "stonvik specification structure",
+        cwd: ".",
+        exitCode: specification.valid ? 0 : 1,
+        durationMs: 0,
+        status: specification.valid ? "passed" : "failed",
+        outputSummary: specification.valid ? "Required specification sections are present." : specification.issues.map((issue) => issue.message).join(" "),
+      });
+    }
+
+    if (policy && specificationValid) {
       for (const command of policy.commands) {
         const started = Date.now();
         try {
@@ -473,10 +828,11 @@ export class FilesystemStonvikRepository {
       else outcome = "passed";
     }
 
+    if (!specificationValid) outcome = "failed";
     const receipt = this.createVerificationReceipt(feature, runId, outcome, checks, evidence);
     await options.onEvent?.({ type: outcome === "passed" ? "receipt" : "gate", kind: "verification.finished", phase: "verification", severity: outcome === "passed" ? "info" : "error", workId: feature.id, message: `Verification finished with outcome ${outcome}.`, nextAction: outcome === "passed" ? "Continue to independent review." : "Inspect verification evidence before retrying." });
     await this.persistReceipt(feature, receipt);
-    if (outcome === "failed" || outcome === "cancelled" || outcome === "manual_required") {
+    if (outcome !== "passed") {
       await this.persistReceipt(feature, this.createHandoffReceipt(feature, runId, outcome === "cancelled" ? "cancelled" : "failed", receipt.id, receipt.summary));
     } else {
       await this.transition(id, "review");
@@ -628,6 +984,8 @@ export class FilesystemStonvikRepository {
     const issues: ValidationReport["issues"] = [];
     for (const dir of this.paths.requiredDirs) if (!(await exists(dir))) issues.push({ severity: "error", code: "MISSING_DIRECTORY", message: `Missing directory: ${path.relative(this.root, dir)}`, path: dir });
     if (issues.length) return { valid: false, issues };
+    try { await loadCoreConfig(this.root); }
+    catch (error) { issues.push({ severity: "error", code: "CONFIG_INVALID", message: String((error as Error).message), path: path.join(this.root, "stonvik.json") }); }
     for (const file of (await safeReaddir(this.paths.inbox)).filter((e) => e.endsWith(".md"))) {
       try { await this.readInboxFile(path.join(this.paths.inbox, file)); } catch (error) { issues.push({ severity: "error", code: "INVALID_INBOX_ITEM", message: String((error as Error).message), path: path.join(this.paths.inbox, file) }); }
     }
@@ -674,10 +1032,53 @@ export class FilesystemStonvikRepository {
         try { await this.validateReceiptFiles(full); } catch (error) { issues.push({ severity: "error", code: "INVALID_RECEIPT", message: String((error as Error).message), path: full }); }
         if (feature) {
           try { await this.validateInboxProvenance(feature); } catch (error) { issues.push({ severity: "error", code: "INVALID_INBOX_PROVENANCE", message: String((error as Error).message), path: full }); }
+          try { await this.validateWorkMetadata(feature); } catch (error) { issues.push({ severity: "error", code: "INVALID_WORK_METADATA", message: String((error as Error).message), path: full }); }
         }
       }
     }
     return { valid: issues.filter((i) => i.severity === "error").length === 0, issues };
+  }
+
+  private assertActor(input: ActorRef, defaultRole: ActorRef["role"]): ActorRef {
+    const parsed = ActorRefSchema.safeParse(input);
+    if (!parsed.success) throw new ActorInvalidError(parsed.error.message);
+    return { ...parsed.data, role: parsed.data.role ?? defaultRole } as ActorRef;
+  }
+
+  private parseExternalExecutionReport(input: ExternalExecutionReport): ExternalExecutionReport {
+    const parsed = ExternalExecutionReportSchema.safeParse(input);
+    if (!parsed.success) throw new WorkReportInvalidError(parsed.error.message);
+    return parsed.data as ExternalExecutionReport;
+  }
+
+  private async readWorkClaim(claimPath: string): Promise<WorkClaim | null> {
+    try {
+      const parsed = WorkClaimSchema.safeParse(JSON.parse(await fs.readFile(claimPath, "utf8")));
+      if (!parsed.success) throw new WorkClaimConflictError(`Invalid Work claim: ${parsed.error.message}`);
+      return parsed.data as WorkClaim;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      if (error instanceof WorkClaimConflictError) throw error;
+      throw new WorkClaimConflictError(`Invalid Work claim: ${String((error as Error).message)}`);
+    }
+  }
+
+  private async releaseWorkClaim(workId: string): Promise<void> {
+    await fs.rm(this.paths.claimPath(workId), { force: true });
+  }
+
+  private validateExternalExecutionReferences(report: ExternalExecutionReport, featurePath: string): void {
+    const existsInRepository = (reference: string): boolean => {
+      if (!isSafeRepositoryPath(reference)) return false;
+      return fssync.existsSync(path.resolve(this.root, reference)) || fssync.existsSync(path.resolve(featurePath, reference));
+    };
+    for (const artifact of report.artifacts ?? []) {
+      if (isExternalUrl(artifact) || !existsInRepository(artifact)) throw new WorkReportInvalidError(`Invalid artifact path: ${artifact}`);
+    }
+    for (const evidence of report.evidence ?? []) {
+      if (!evidence.ref || isExternalUrl(evidence.ref)) continue;
+      if (!existsInRepository(evidence.ref)) throw new WorkReportInvalidError(`Invalid evidence path: ${evidence.ref}`);
+    }
   }
 
   private async transition(id: string, to: FeatureState, createLease = false): Promise<Feature> {
@@ -763,6 +1164,23 @@ export class FilesystemStonvikRepository {
     return paths;
   }
 
+  private async validateWorkMetadata(feature: Feature): Promise<void> {
+    if (feature.manifest.classification) validateClassification(feature.manifest.classification);
+    const decision = feature.manifest.routingDecision;
+    if (!decision) return;
+    validateRoutingDecisionShape(decision);
+    const reference = feature.manifest.routingDecisionRef;
+    if (!reference || !isSafeRepositoryPath(reference)) throw new InvalidManifestError(`Work ${feature.id} has no safe routing decision reference.`);
+    const referencePath = path.resolve(feature.path, reference);
+    if (!isWithin(feature.path, referencePath) || !(await exists(referencePath))) throw new InvalidManifestError(`Routing decision reference is missing: ${reference}`);
+    const parsed = RoutingDecisionSchema.parse(YAML.parse(await fs.readFile(referencePath, "utf8"))) as RoutingDecision;
+    if (parsed.inboxId !== decision.inboxId
+      || parsed.inboxId !== (feature.manifest.source?.type === "inbox" ? feature.manifest.source.ref : parsed.inboxId)
+      || stableJson(parsed) !== stableJson(decision)) {
+      throw new InvalidManifestError(`Routing decision does not match Work ${feature.id}.`);
+    }
+  }
+
   private async validateInboxProvenance(feature: Feature): Promise<void> {
     const inboxIds = new Set<string>();
     for (const entry of (await safeReaddir(this.provenanceInboxDir(feature.path))).filter((name) => name.endsWith(".md"))) {
@@ -810,6 +1228,45 @@ export class FilesystemStonvikRepository {
       engine,
       artifacts: result.artifacts,
       details: result.details,
+    };
+  }
+
+  private createActorExecutionReceipt(
+    feature: Feature,
+    runId: string,
+    actor: ActorRef,
+    outcome: string,
+    summary: string,
+    artifacts?: string[],
+    evidence?: ExternalExecutionEvidence[],
+    details?: Record<string, unknown>,
+  ): Receipt {
+    return {
+      ...this.receiptBase(feature, "execution", outcome, summary, runId, actor.type, actor.name),
+      kind: "execution",
+      outcome,
+      actor: { ...actor },
+      artifacts,
+      evidence,
+      details,
+    };
+  }
+
+  private createActorReviewReceipt(
+    feature: Feature,
+    actor: ActorRef,
+    decision: ReviewDecision,
+    summary: string,
+    findings?: string[],
+    runId?: string,
+  ): Receipt {
+    return {
+      ...this.receiptBase(feature, "review", decision, summary, runId ?? `review-${timestampForFile()}-${shortId()}`, actor.type, actor.name),
+      kind: "review",
+      outcome: decision,
+      decision,
+      actor: { ...actor },
+      findings: findings?.length ? findings : undefined,
     };
   }
 
@@ -862,12 +1319,16 @@ export class FilesystemStonvikRepository {
     const manifestPath = path.resolve(featurePath, receipt.feature.manifestPath);
     if (!isWithin(featurePath, manifestPath) || !fssync.existsSync(manifestPath)) throw new InvalidReceiptError(`Missing manifest reference: ${receipt.feature.manifestPath}`);
     const refs: string[] = [];
-    if (receipt.kind === "verification") refs.push(...(receipt.evidence ?? []).flatMap((item) => item.ref ? [item.ref] : []));
+    if (receipt.kind === "verification" || receipt.kind === "execution") refs.push(...(receipt.evidence ?? []).flatMap((item) => item.ref ? [item.ref] : []));
     if (receipt.kind === "execution") refs.push(...(receipt.artifacts ?? []));
     for (const ref of refs) {
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) continue;
-      const resolved = path.resolve(featurePath, ref);
-      if (!isWithin(featurePath, resolved) || !fssync.existsSync(resolved)) throw new InvalidReceiptError(`Invalid local receipt reference: ${ref}`);
+      if (isExternalUrl(ref)) continue;
+      const featureResolved = path.resolve(featurePath, ref);
+      const repositoryResolved = path.resolve(this.root, ref);
+      const safePath = isSafeRepositoryPath(ref);
+      const featureLocal = safePath && isWithin(featurePath, featureResolved) && fssync.existsSync(featureResolved);
+      const repositoryLocal = safePath && isWithin(this.root, repositoryResolved) && fssync.existsSync(repositoryResolved);
+      if (!featureLocal && !repositoryLocal) throw new InvalidReceiptError(`Invalid local receipt reference: ${ref}`);
     }
   }
 
@@ -918,6 +1379,7 @@ export class FilesystemStonvikRepository {
     if (item.featureRef) fm.featureRef = item.featureRef;
     if (item.clarification) fm.clarification = item.clarification;
     if (item.classification) fm.classification = item.classification;
+    if (item.routingDecision) fm.routingDecision = item.routingDecision;
     return `---\n${YAML.stringify(fm)}---\n\n# ${item.title}\n${item.body ? `\n${item.body}\n` : ""}`;
   }
 
@@ -1031,4 +1493,52 @@ function redactOutput(output: string): string {
     .replace(/(authorization\s*:\s*|bearer\s+|token\s*=\s*|password\s*=\s*)[^\s,;]+/gi, "$1[REDACTED]")
     .trim();
   return redacted.length > MAX_OUTPUT_SUMMARY_LENGTH ? `${redacted.slice(0, MAX_OUTPUT_SUMMARY_LENGTH)}…` : redacted;
+}
+
+function directVerificationPolicy(paths: string[]): { commands: Array<{ name: string; run: string }> } {
+  const commands = paths.map((repositoryPath) => ({
+    name: `verify ${repositoryPath} exists`,
+    run: `test -f ${shellQuote(repositoryPath)}`,
+  }));
+  return { commands: commands.length ? commands : [{ name: "verify completion", run: "true" }] };
+}
+
+function extractRepositoryPaths(text: string): string[] {
+  return [...new Set(text.match(/\b(?:[\w.-]+\/)*[\w-]+\.[A-Za-z0-9]{1,12}\b/g) ?? [])]
+    .filter((value) => !value.startsWith("http") && !value.includes("://") && isSafeRepositoryPath(value));
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function stableJson(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function isExternalUrl(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
+}
+
+function isSafeRepositoryPath(value: string): boolean {
+  return Boolean(value)
+    && !value.includes("\0")
+    && !path.isAbsolute(value)
+    && !/^[A-Za-z]:[\\/]/.test(value)
+    && !value.split(/[\\/]/).includes("..");
+}
+
+function isLiveClaim(claim: WorkClaim): boolean {
+  if (claim.host !== os.hostname()) return false;
+  try {
+    process.kill(claim.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

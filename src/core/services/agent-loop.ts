@@ -4,20 +4,16 @@ import { FilesystemStonvikRepository } from "../repository/filesystem-stonvik-re
 import type { Classification, Feature, FeatureState, InboxItem, RunEvent, WorkReviewDecision } from "../domain/types.js";
 import { hasVerificationPlan, isAutomaticClassification, validateClassification } from "./classification.js";
 import { classifyDeterministically } from "./deterministic-classifier.js";
-import { PiClassificationAdapter } from "../execution/pi-classification-adapter.js";
 import { ExecutionAdapterRegistry } from "../execution/execution-adapter.js";
-import { PiRpcExecutionAdapter } from "../execution/pi-rpc-execution-adapter.js";
-import { SpecFlowExecutionAdapter } from "../execution/spec-flow-execution-adapter.js";
-import type { WorkReviewAdapter } from "../execution/work-review-adapter.js";
-import { PiWorkReviewAdapter } from "../execution/work-review-adapter.js";
+import type { AdapterProgress, AdapterProgressCallback, WorkReviewAdapter } from "../execution/execution-adapter.js";
 import { RunEventSink, type RunEventInput } from "./run-event-sink.js";
-import { loadStonvikConfig, resolvePiCommand, type StonvikConfig } from "./config.js";
 
 export interface AgentLoopOptions {
   dryRun?: boolean;
   nonInteractive?: boolean;
   signal?: AbortSignal;
-  classify?: (item: InboxItem, signal?: AbortSignal, onProgress?: import("../execution/execution-adapter.js").AdapterProgressCallback, repairReason?: string) => Promise<unknown>;
+  classify?: (item: InboxItem, signal?: AbortSignal, onProgress?: AdapterProgressCallback, repairReason?: string) => Promise<unknown>;
+  deterministicClassification?: boolean;
   registry?: ExecutionAdapterRegistry;
   reviewer?: WorkReviewAdapter;
   onEvent?: (event: RunEvent) => Promise<void> | void;
@@ -33,12 +29,9 @@ export interface AgentLoopResult {
 }
 
 export class AgentLoop {
-  private config: StonvikConfig | undefined;
-
   constructor(private readonly repo: FilesystemStonvikRepository) {}
 
   async run(options: AgentLoopOptions = {}): Promise<AgentLoopResult> {
-    this.config = await loadStonvikConfig(this.repo.root);
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const result: AgentLoopResult = { root: this.repo.root, actions: [], features: [], inboxReview: 0, stopReason: "idle" };
     const release = options.dryRun ? async () => undefined : await this.repo.acquireLoopLease(runId);
@@ -109,17 +102,12 @@ export class AgentLoop {
   }
 
   private async processInbox(inbox: InboxItem[], result: AgentLoopResult, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>, runId: string): Promise<void> {
-    const command = resolvePiCommand(this.config);
-    const piClassifier = options.classify ? undefined : new PiClassificationAdapter(
-      command,
-      this.config?.classification?.timeoutMs,
-      this.config?.classification?.heartbeatIntervalMs,
-      this.config?.pi?.classificationModel,
-    );
-    const classifier = options.classify ?? ((item: InboxItem, signal?: AbortSignal, onProgress?: import("../execution/execution-adapter.js").AdapterProgressCallback, repairReason?: string) => piClassifier!.classify(item, signal, onProgress, repairReason));
-    const useDeterministic = !options.classify && process.env.STONVIK_DETERMINISTIC_CLASSIFIER !== "0";
-    try {
-      for (const item of inbox.filter((c) => c.status === "captured" || c.status === "needs_definition" || c.status === "needs_clarification")) {
+    // AgentLoop is retained as a compatibility orchestration loop, but the
+    // core never constructs or discovers an agent. Integrations inject the
+    // classifier explicitly through AgentLoopOptions.
+    const classifier = options.classify;
+    const useDeterministic = !classifier && options.deterministicClassification !== false;
+    for (const item of inbox.filter((c) => c.status === "captured" || c.status === "needs_definition" || c.status === "needs_clarification")) {
         if (options.dryRun) {
           result.actions.push({ kind: "inbox", id: item.id, action: "classification_planned", nextAction: `Classify Inbox item ${item.id}.` });
           continue;
@@ -204,10 +192,15 @@ export class AgentLoop {
           await emit({ type: "classification", kind: "classification.started", phase: "classification", inboxId: item.id, message: `Classifying ${item.id} (deterministic).` });
           await this.repo.recordClassification(item, classification, runId);
           await emit({ type: "classification", kind: "classification.finished", phase: "classification", inboxId: item.id, message: `Classified ${item.id} as ${classification.route}/${classification.size} (deterministic).` });
+        } else if (!classifier) {
+          const nextAction = "Provide an external classifier or run `stonvik prepare` manually.";
+          result.actions.push({ kind: "inbox", id: item.id, action: "classification_unavailable", nextAction });
+          await emit({ type: "gate", kind: "gate.reached", phase: "classification", inboxId: item.id, severity: "warning", message: `No external classifier is configured for ${item.id}.`, nextAction });
+          continue;
         } else {
         try {
           await emit({ type: "classification", kind: "classification.started", phase: "classification", inboxId: item.id, message: `Classifying ${item.id}.` });
-          const onProgress = async (progress: import("../execution/execution-adapter.js").AdapterProgress) => { await emit({ type: "status", kind: progress.kind, phase: progress.phase, severity: progress.severity, inboxId: item.id, message: progress.message, elapsedMs: progress.elapsedMs }, { durable: progress.durable === true }); };
+          const onProgress = async (progress: AdapterProgress) => { await emit({ type: "status", kind: progress.kind, phase: progress.phase, severity: progress.severity, inboxId: item.id, message: progress.message, elapsedMs: progress.elapsedMs }, { durable: progress.durable === true }); };
           try {
             classification = validateClassification(await classifier(item, options.signal, onProgress));
           } catch (error) {
@@ -329,18 +322,11 @@ export class AgentLoop {
         result.actions.push({ kind: "inbox", id: item.id, action: "moved_to_review" });
         await emit({ type: "gate", kind: "gate.reached", phase: "classification", inboxId: item.id, severity: "warning", message: `Moved ${item.id} to review: needs human decision.` });
       }
-    } finally {
-      piClassifier?.close();
-    }
   }
 
   private async implement(feature: Feature, options: AgentLoopOptions, emit: (event: RunEventInput, options?: { durable?: boolean }) => Promise<RunEvent>, runId: string) {
-    const command = resolvePiCommand(this.config);
-    const implModel = this.config?.pi?.implementationModel;
-    const registry = options.registry ?? new ExecutionAdapterRegistry([
-      new PiRpcExecutionAdapter(command, this.config?.execution?.timeoutMs, this.config?.execution?.heartbeatIntervalMs, implModel),
-      new SpecFlowExecutionAdapter(command, this.config?.execution?.timeoutMs, this.config?.execution?.heartbeatIntervalMs, implModel),
-    ]);
+    const registry = options.registry;
+    if (!registry) return { outcome: "needs_human" as const, feature, summary: "No external execution adapter is configured." };
     const receipts = await this.repo.listReceipts(feature.id);
     const lastExecution = [...receipts].reverse().find((receipt) => receipt.kind === "execution");
     const lastHandoff = [...receipts].reverse().find((receipt) => receipt.kind === "handoff");
@@ -366,23 +352,19 @@ export class AgentLoop {
       const execution = [...priorReceipts].reverse().find((receipt) => receipt.kind === "execution");
       if (execution?.kind === "execution" && execution.details?.featureFingerprint === fingerprint) return { state: feature.state, action: "needs_human", stopReason: "review_needs_human", nextAction: "Record a human review decision or change the Work before retrying." };
     }
-    const command = resolvePiCommand(this.config);
-    const reviewer = options.reviewer ?? new PiWorkReviewAdapter(
-      command,
-      this.config?.review?.timeoutMs,
-      this.config?.review?.heartbeatIntervalMs,
-      this.config?.pi?.reviewModel,
-    );
+    const reviewer = options.reviewer;
     if (!reviewer) {
-      const updated = await this.repo.reviewFeature(feature.id, "needs_human", "No independent reviewer is configured.", "pi-review", undefined, runId);
-      await emit({ type: "gate", kind: "review.finished", phase: "review", workId: feature.id, state: updated.state, severity: "warning", message: "Independent review needs human attention.", nextAction: "Configure Pi or record an explicit review decision." });
-      return { state: updated.state, action: "needs_human", stopReason: "review_needs_human", nextAction: "Configure Pi or record an explicit review decision." };
+      const nextAction = "Record an explicit independent review decision.";
+      const updated = await this.repo.reviewFeature(feature.id, "needs_human", "No independent reviewer is configured.", "external-review", undefined, runId);
+      await emit({ type: "gate", kind: "review.finished", phase: "review", workId: feature.id, state: updated.state, severity: "warning", message: "Independent review needs human attention.", nextAction });
+      return { state: updated.state, action: "needs_human", stopReason: "review_needs_human", nextAction };
     }
     let decision: WorkReviewDecision;
     const beforeReview = await this.repo.durableFeatureFingerprint(feature.id);
     await emit({ type: "status", kind: "review.started", phase: "review", workId: feature.id, message: `Independent review started for ${feature.id}.` });
     try {
-      decision = await reviewer.review({ root: this.repo.root, feature, runId, receipts: await this.repo.listReceipts(feature.id), verification: await this.repo.listReceipts(feature.id), onProgress: async (progress) => { await emit({ type: "status", kind: progress.kind, phase: progress.phase, severity: progress.severity, workId: feature.id, message: progress.message, elapsedMs: progress.elapsedMs }, { durable: progress.durable === true }); } });
+      const receipts = await this.repo.listReceipts(feature.id);
+      decision = await reviewer.review({ root: this.repo.root, feature, runId, receipts, verification: receipts.filter((receipt) => receipt.kind === "verification"), onProgress: async (progress) => { await emit({ type: "status", kind: progress.kind, phase: progress.phase, severity: progress.severity, workId: feature.id, message: progress.message, elapsedMs: progress.elapsedMs }, { durable: progress.durable === true }); } });
     } catch (error) {
       const updated = await this.repo.reviewFeature(feature.id, "needs_human", String((error as Error).message), reviewer.id, undefined, runId);
       await emit({ type: "gate", kind: "review.finished", phase: "review", workId: feature.id, state: updated.state, severity: "warning", message: "Independent review needs human attention.", nextAction: "Review the Work and record an explicit decision." });

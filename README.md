@@ -20,3 +20,5 @@ intent, executable work, evidence, and decisions.
 
 The CLI, TypeScript types, schemas, and tests are the operational
 documentation. Run `stonvik --help` for the current interface.
+
+Public client documentation: [docs/public/README.md](docs/public/README.md).

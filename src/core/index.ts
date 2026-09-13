@@ -1,11 +1,21 @@
 export * from "./domain/types.js";
 export * from "./errors/stonvik-errors.js";
+export * from "./schemas/actor.schema.js";
+export * from "./schemas/routing.schema.js";
+export * from "./schemas/handoff.schema.js";
+export * from "./schemas/external-execution-report.schema.js";
+export * from "./schemas/work-claim.schema.js";
+export * from "./services/actors.js";
+export * from "./services/routing.js";
+export * from "./services/work-handoff.js";
+export * from "./services/specification.js";
 export * from "./repository/filesystem-stonvik-repository.js";
 export * from "./repository/repo-discovery.js";
 export * from "./services/id.js";
 export * from "./services/spec-flow-commands.js";
 export * from "./schemas/receipt.schema.js";
 export * from "./execution/execution-adapter.js";
+// Legacy compatibility exports. New integrations must import from src/integrations/pi.
 export * from "./execution/pi-rpc-execution-adapter.js";
 export * from "./execution/spec-flow-execution-adapter.js";
 export * from "./execution/pi-classification-adapter.js";
@@ -20,3 +30,4 @@ export * from "./schemas/classification.schema.js";
 export * from "./schemas/definition.schema.js";
 export * from "./schemas/run-event.schema.js";
 export * from "./schemas/work-review.schema.js";
+export * from "./schemas/manifest.schema.js";

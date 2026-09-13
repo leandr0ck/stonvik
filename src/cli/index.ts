@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import path from "node:path";
 import fs from "node:fs";
+import YAML from "yaml";
 import { execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
-import { AgentLoop, ExecutionAdapterRegistry, FilesystemStonvikRepository, StonvikError, SpecFlowExecutionAdapter, findRepositoryRoot, type Classification, type FeatureState, type InboxItem, type RunEvent } from "../core/index.js";
+import { AgentLoop, ExecutionAdapterRegistry, FilesystemStonvikRepository, StonvikError, actorFromInput, findRepositoryRoot, renderWorkHandoffMarkdown, type ActorRef, type ActorRole, type Classification, type ExternalExecutionReport, type FeatureState, type InboxItem, type RunEvent, type WorkKind } from "../core/index.js";
+import { PiClassificationAdapter, PiRpcExecutionAdapter, PiWorkReviewAdapter, SpecFlowExecutionAdapter, loadStonvikConfig, resolvePiCommand } from "../integrations/pi/index.js";
 
 interface GlobalOptions { root?: string; json?: boolean }
 
@@ -34,6 +36,56 @@ program.command("capture")
     const text = argText || (process.stdin.isTTY ? "" : (await readStdin()).trim());
     const item = await repo.capture({ text, source: opts.source });
     output(item, `Captured ${item.id}\n${relative(repo.root, item.path)}`);
+  });
+
+program.command("prepare")
+  .description("Prepare captured intent as direct or spec-first Work")
+  .argument("<inboxId>", "Inbox item ID")
+  .requiredOption("--route <route>", "direct or spec-first")
+  .option("--actor <actor>", "declared routing actor (type:name)")
+  .option("--role <role>", "actor role; defaults to triager")
+  .option("--size <size>", "declared size signal")
+  .option("--touched-files <count>", "declared touched-file count", parseInteger)
+  .option("--risk <risk>", "declared routing risk; repeatable", collectOption, [])
+  .option("--rationale <text>", "routing rationale; repeatable", collectOption, [])
+  .action(async (inboxId: string, opts: { route: string; actor?: string; role?: string; size?: string; touchedFiles?: number; risk: string[]; rationale: string[] }) => {
+    if (opts.route !== "direct" && opts.route !== "spec-first") throw new StonvikError(`Invalid preparation route: ${opts.route}`, "PREPARATION_ROUTE_INVALID", 2);
+    const actor = commandActor(opts.actor, parseActorRole(opts.role, "triager"));
+    const signals = {
+      ...(opts.size ? { size: parseWorkSize(opts.size) } : {}),
+      ...(opts.touchedFiles !== undefined ? { estimatedTouchedFiles: opts.touchedFiles } : {}),
+      ...(opts.risk.length ? { risks: opts.risk } : {}),
+      ...(opts.rationale.length ? { rationale: opts.rationale } : {}),
+    };
+    const repo = await repoForCommand();
+    const feature = await repo.prepareWork(inboxId, { route: opts.route, actor, signals });
+    output(feature, `Prepared ${feature.id} (${feature.manifest.kind}) in ${feature.state}.\n${relative(repo.root, feature.path)}`);
+  });
+
+program.command("next")
+  .description("Select the oldest ready Work without claiming it")
+  .action(async () => {
+    const repo = await repoForCommand();
+    const feature = await repo.getNextReady();
+    output(feature, feature ? `${feature.id}\t${feature.manifest.kind}\t${feature.manifest.title}` : "No ready Work.");
+  });
+
+program.command("handoff <id>")
+  .description("Generate a neutral Work handoff")
+  .option("--format <format>", "json or markdown", "json")
+  .action(async (id: string, opts: { format: string }) => {
+    if (opts.format !== "json" && opts.format !== "markdown") throw new StonvikError(`Invalid handoff format: ${opts.format}`, "HANDOFF_FORMAT_INVALID", 2);
+    const repo = await repoForCommand();
+    const handoff = await repo.createWorkHandoff(id);
+    output(handoff, opts.format === "markdown" ? renderWorkHandoffMarkdown(handoff) : JSON.stringify(handoff, null, 2));
+  });
+
+program.command("verify <id>")
+  .description("Run deterministic verification for a reported Work")
+  .action(async (id: string) => {
+    const repo = await repoForCommand();
+    const receipt = await repo.verifyWork(id);
+    output(receipt, `Verification ${receipt.outcome} for ${id}`);
   });
 
 const inbox = program.command("inbox").description("List Inbox items");
@@ -96,7 +148,7 @@ migrate.command("inbox-provenance")
   });
 
 program.command("triage")
-  .description("Classify captured Inbox items into executable Work")
+  .description("Deprecated compatibility path: classify captured Inbox items (prefer prepare)")
   .option("--non-interactive", "never prompt or approve captured Inbox items")
   .option("--dry-run", "show the next action without writing")
   .action(async (opts: { nonInteractive?: boolean; dryRun?: boolean }) => {
@@ -119,7 +171,7 @@ definition.command("edit <inboxId>")
   });
 
 program.command("run")
-  .description("Run the autonomous product, implementation, verification, and review loop")
+  .description("Deprecated compatibility loop; prefer neutral prepare/next/work/report/verify/review commands")
   .option("--non-interactive", "never prompt or approve captured Inbox items")
   .option("--dry-run", "show planned actions without writing")
   .option("--watch", "wait for durable changes and resume the loop")
@@ -190,13 +242,99 @@ work.command("create")
   .option("--slug <slug>", "Feature slug")
   .option("--verify-command <command>", "Verification command; repeat for multiple commands", collectOption, [])
   .option("--manual-evidence <criterion:kind>", "Manual evidence requirement; repeat for multiple entries", collectOption, [])
-  .action(async (opts: { title: string; goal: string; acceptance: string[]; constraint?: string[]; slug?: string; verifyCommand: string[]; manualEvidence: string[] }) => {
+  .option("--kind <kind>", "implementation or specification", "implementation")
+  .option("--spec-file <path>", "specification document to stage")
+  .action(async (opts: { title: string; goal: string; acceptance: string[]; constraint?: string[]; slug?: string; verifyCommand: string[]; manualEvidence: string[]; kind: WorkKind; specFile?: string }) => {
+    if (opts.kind !== "implementation" && opts.kind !== "specification") throw new StonvikError(`Invalid Work kind: ${opts.kind}`, "WORK_KIND_INVALID", 2);
     const repo = await repoForCommand();
-    const verification = buildVerification(opts.verifyCommand, opts.manualEvidence);
-    const input = { title: opts.title, goal: opts.goal, acceptance: opts.acceptance, constraints: opts.constraint, slug: opts.slug, verification };
+    const baseVerification = buildVerification(opts.verifyCommand, opts.manualEvidence);
+    const verification = opts.kind === "specification" ? { ...baseVerification, review: "required" as const } : baseVerification;
+    const specDocument = opts.specFile ? fs.readFileSync(resolveRepositoryPath(repo.root, opts.specFile, "SPECIFICATION_INVALID"), "utf8") : undefined;
+    const input = { title: opts.title, goal: opts.goal, acceptance: opts.acceptance, constraints: opts.constraint, slug: opts.slug, verification, kind: opts.kind, specDocument };
     const created = await repo.createFeature(input);
     output(created, `Created ${created.id}\n${relative(repo.root, created.path)}`);
   });
+
+work.command("start <id>")
+  .description("Claim ready or resumable Work for an external actor")
+  .option("--actor <actor>", "declared implementer actor (type:name)")
+  .option("--run-id <runId>", "stable execution run ID")
+  .action(async (id: string, opts: { actor?: string; runId?: string }) => {
+    const repo = await repoForCommand();
+    const feature = await repo.startWork(id, commandActor(opts.actor, "implementer"), opts.runId);
+    output(feature, `Started ${feature.id} as ${feature.state}`);
+  });
+
+work.command("claim <id>")
+  .description("Inspect the ephemeral claim for Work")
+  .action(async (id: string) => {
+    const repo = await repoForCommand();
+    const claim = await repo.getWorkClaim(id);
+    output(claim, claim ? `Claimed by ${claim.actor.type}:${claim.actor.name} (pid ${claim.pid})` : "No active claim.");
+  });
+
+work.command("recover <id>")
+  .description("Recover Work after a previous actor process disappeared")
+  .option("--actor <actor>", "declared implementer actor (type:name)")
+  .option("--run-id <runId>", "stable recovery run ID")
+  .action(async (id: string, opts: { actor?: string; runId?: string }) => {
+    const repo = await repoForCommand();
+    const feature = await repo.recoverWork(id, commandActor(opts.actor, "implementer"), opts.runId);
+    output(feature, `Recovered ${feature.id} as ${feature.state}`);
+  });
+
+work.command("report <id>")
+  .description("Import a structured execution report from an external actor")
+  .requiredOption("--receipt <path>", "JSON or YAML report path")
+  .option("--run-id <runId>", "stable execution run ID")
+  .action(async (id: string, opts: { receipt: string; runId?: string }) => {
+    const repo = await repoForCommand();
+    const reportPath = resolveRepositoryPath(repo.root, opts.receipt, "WORK_REPORT_INVALID");
+    let report: ExternalExecutionReport;
+    let rawReport: string;
+    try {
+      rawReport = fs.readFileSync(reportPath, "utf8");
+      try {
+        report = JSON.parse(rawReport) as ExternalExecutionReport;
+      } catch {
+        report = YAML.parse(rawReport) as ExternalExecutionReport;
+      }
+    } catch (error) {
+      throw new StonvikError(`Could not read execution report: ${String((error as Error).message)}`, "WORK_REPORT_INVALID", 2);
+    }
+    const result = await repo.recordExternalExecutionReport(id, report, { runId: opts.runId });
+    output(result, `Recorded ${result.receipt.kind} for ${id} (${report.outcome}).\nNext: ${result.nextAction}`);
+  });
+
+work.command("review <id>")
+  .description("Record an independent review decision")
+  .option("--actor <actor>", "declared reviewer actor (type:name); defaults to STONVIK_ACTOR")
+  .requiredOption("--decision <decision>", "approved, changes_requested, blocked, or needs_human")
+  .option("--summary <summary>", "review summary", "Review decision recorded.")
+  .option("--finding <finding>", "review finding; repeatable", collectOption, [])
+  .action(async (id: string, opts: { actor: string; decision: string; summary: string; finding: string[] }) => {
+    if (!["approved", "changes_requested", "blocked", "needs_human"].includes(opts.decision)) throw new StonvikError(`Invalid review decision: ${opts.decision}`, "REVIEW_DECISION_INVALID", 2);
+    const repo = await repoForCommand();
+    const feature = await repo.reviewWork(id, commandActor(opts.actor, "reviewer"), opts.decision as "approved" | "changes_requested" | "blocked" | "needs_human", opts.summary, opts.finding);
+    output(feature, `Reviewed ${feature.id}; state: ${feature.state}`);
+  });
+
+work.command("unblock <id>")
+  .description("Return blocked Work to ready after the blocker is resolved")
+  .action(async (id: string) => {
+    const repo = await repoForCommand();
+    const feature = await repo.unblockFeature(id);
+    output(feature, `Unblocked ${feature.id}; state: ${feature.state}`);
+  });
+
+work.command("create-from-spec <id>")
+  .description("Create ready implementation Work from an approved specification Work")
+  .action(async (id: string) => {
+    const repo = await repoForCommand();
+    const feature = await repo.createImplementationFromSpecification(id);
+    output(feature, `Created implementation ${feature.id} from specification ${id}`);
+  });
+
 work.command("list")
   .description("List Work")
   .option("--state <state>", "state filter")
@@ -207,7 +345,7 @@ work.command("list")
   });
 
 program.command("implement [id]")
-  .description("Start or observe a spec-driven implementation without controlling its internal ticket flow")
+  .description("Deprecated compatibility implementation path; prefer work start/handoff/report")
   .option("--engine <engine>", "implementation engine", "pi-spec-flow")
   .action(async (id: string | undefined, opts: { engine: string }) => {
     if (opts.engine !== "pi-spec-flow") throw new StonvikError(`Unsupported implementation engine: ${opts.engine}`, "IMPLEMENT_ENGINE_INVALID", 2);
@@ -270,6 +408,41 @@ async function repoForCommand(): Promise<FilesystemStonvikRepository> {
 
 function output(data: unknown, human: string): void { if (program.opts<GlobalOptions>().json) console.log(JSON.stringify(data, null, 2)); else console.log(human); }
 function relative(root: string, p: string): string { return path.relative(root, p) || "."; }
+function resolveRepositoryPath(root: string, value: string, code: string): string {
+  const repositoryRoot = path.resolve(root);
+  const resolved = path.resolve(repositoryRoot, value);
+  const relativePath = path.relative(repositoryRoot, resolved);
+  if (path.isAbsolute(relativePath) || relativePath === ".." || relativePath.startsWith(`..${path.sep}`)) {
+    throw new StonvikError(`Path must stay inside the repository: ${value}`, code, 2);
+  }
+  return resolved;
+}
+
+function commandActor(value: string | undefined, role: ActorRole): ActorRef {
+  try {
+    return actorFromInput(value, role, process.env.STONVIK_ACTOR);
+  } catch (error) {
+    throw new StonvikError(String((error as Error).message ?? error), "ACTOR_INVALID", 2);
+  }
+}
+
+function parseActorRole(value: string | undefined, fallback: ActorRole): ActorRole {
+  const role = value ?? fallback;
+  const roles: ActorRole[] = ["triager", "implementer", "specifier", "verifier", "reviewer", "product-owner"];
+  if (roles.includes(role as ActorRole)) return role as ActorRole;
+  throw new StonvikError(`Invalid actor role: ${role}`, "ACTOR_ROLE_INVALID", 2);
+}
+
+function parseInteger(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new StonvikError(`Invalid integer: ${value}`, "OPTION_INVALID", 2);
+  return parsed;
+}
+
+function parseWorkSize(value: string): "XS" | "S" | "M" | "L" | "XL" {
+  if (value === "XS" || value === "S" || value === "M" || value === "L" || value === "XL") return value;
+  throw new StonvikError(`Invalid Work size: ${value}`, "WORK_SIZE_INVALID", 2);
+}
 
 function parseProgressMode(value: string | undefined): ProgressMode {
   if (value === "auto" || value === "off" || value === "plain" || value === "ndjson") return value;
@@ -386,23 +559,78 @@ async function triage(repo: FilesystemStonvikRepository, options: TriageOptions)
   return result;
 }
 
+interface LegacyAgentDependencies {
+  options: {
+    classify?: (item: InboxItem, signal?: AbortSignal, onProgress?: import("../core/execution/execution-adapter.js").AdapterProgressCallback, repairReason?: string) => Promise<unknown>;
+    deterministicClassification?: boolean;
+    registry?: ExecutionAdapterRegistry;
+    reviewer?: PiWorkReviewAdapter;
+  };
+  close: () => void;
+}
+
+async function legacyAgentDependencies(repo: FilesystemStonvikRepository): Promise<LegacyAgentDependencies> {
+  const config = await loadStonvikConfig(repo.root);
+  const explicitlyRequested = Boolean(process.env.STONVIK_PI_COMMAND || config?.pi?.command || process.env.STONVIK_DETERMINISTIC_CLASSIFIER === "0");
+  if (!explicitlyRequested) return { options: { deterministicClassification: true }, close: () => undefined };
+  const command = resolvePiCommand(config);
+  const classifier = new PiClassificationAdapter(
+    command,
+    config?.classification?.timeoutMs,
+    config?.classification?.heartbeatIntervalMs,
+    config?.pi?.classificationModel,
+  );
+  const available = await classifier.isAvailable();
+  if (!available) {
+    classifier.close();
+    return {
+      options: {
+        deterministicClassification: process.env.STONVIK_DETERMINISTIC_CLASSIFIER !== "0",
+        registry: new ExecutionAdapterRegistry([
+          new PiRpcExecutionAdapter(command, config?.execution?.timeoutMs, config?.execution?.heartbeatIntervalMs, config?.pi?.implementationModel),
+          new SpecFlowExecutionAdapter(command, config?.execution?.timeoutMs, config?.execution?.heartbeatIntervalMs, config?.pi?.implementationModel),
+        ]),
+      },
+      close: () => undefined,
+    };
+  }
+  return {
+    options: {
+      classify: (item, signal, onProgress, repairReason) => classifier.classify(item, signal, onProgress, repairReason),
+      registry: new ExecutionAdapterRegistry([
+        new PiRpcExecutionAdapter(command, config?.execution?.timeoutMs, config?.execution?.heartbeatIntervalMs, config?.pi?.implementationModel),
+        new SpecFlowExecutionAdapter(command, config?.execution?.timeoutMs, config?.execution?.heartbeatIntervalMs, config?.pi?.implementationModel),
+      ]),
+      reviewer: new PiWorkReviewAdapter(command, config?.review?.timeoutMs, config?.review?.heartbeatIntervalMs, config?.pi?.reviewModel),
+    },
+    close: () => classifier.close(),
+  };
+}
+
 async function runLoop(repo: FilesystemStonvikRepository, options: RunOptions, isInterrupted = () => false): Promise<RunResult> {
-  // Without a configured agent, preserve a safe human-only recovery pass. The
-  // autonomous path is selected as soon as STONVIK_PI_COMMAND is configured;
-  // no unstructured local process is treated as a state authority.
+  // Without an explicitly requested agent integration, preserve a safe
+  // human-only pass. No unstructured local process is treated as a state
+  // authority.
   const loop = new AgentLoop(repo);
+  const dependencies = await legacyAgentDependencies(repo);
   const events: RunEvent[] = [];
   const progress = options.progress ?? "auto";
   const stream = progress === "plain" || progress === "ndjson" || (progress === "auto" && Boolean(process.stdout.isTTY));
-  const result = await loop.run({
-    dryRun: options.dryRun,
-    nonInteractive: options.nonInteractive,
-    signal: options.signal ?? (isInterrupted() ? AbortSignal.abort() : undefined),
-    onEvent: (event) => {
-      events.push(event);
-      if (stream) renderProgress(event, progress);
-    },
-  });
+  let result: Awaited<ReturnType<AgentLoop["run"]>>;
+  try {
+    result = await loop.run({
+      ...dependencies.options,
+      dryRun: options.dryRun,
+      nonInteractive: options.nonInteractive,
+      signal: options.signal ?? (isInterrupted() ? AbortSignal.abort() : undefined),
+      onEvent: (event) => {
+        events.push(event);
+        if (stream) renderProgress(event, progress);
+      },
+    });
+  } finally {
+    dependencies.close();
+  }
   return {
     root: result.root,
     actions: result.actions.map((action) => ({ kind: "inbox" as const, id: action.id, action: action.action, definitionRef: action.definitionRef, definitionKind: action.definitionKind })),
@@ -419,14 +647,21 @@ async function watchLoop(repo: FilesystemStonvikRepository, options: RunOptions,
   const run = async () => {
     const events = [] as unknown[];
     const loop = new AgentLoop(repo);
+    const dependencies = await legacyAgentDependencies(repo);
     const progress = options.progress ?? (program.opts<GlobalOptions>().json ? "ndjson" : "plain");
     const stream = progress !== "off";
-    const result = await loop.run({
-      dryRun: options.dryRun,
-      nonInteractive: options.nonInteractive,
-      signal: options.signal,
-      onEvent: async (event) => { events.push(event); if (stream) renderProgress(event, progress); },
-    });
+    let result: Awaited<ReturnType<AgentLoop["run"]>>;
+    try {
+      result = await loop.run({
+        ...dependencies.options,
+        dryRun: options.dryRun,
+        nonInteractive: options.nonInteractive,
+        signal: options.signal,
+        onEvent: async (event) => { events.push(event); if (stream) renderProgress(event, progress); },
+      });
+    } finally {
+      dependencies.close();
+    }
     const status = await repo.getStatus();
     const includeEvents = result.stopReason !== "idle" && !stream && progress !== "off";
     if (progress !== "ndjson") console.log(renderRun({ root: result.root, actions: result.actions.map((a) => ({ kind: "inbox", id: a.id, action: a.action, definitionRef: a.definitionRef, definitionKind: a.definitionKind })), features: result.features, inboxReview: result.inboxReview, stopReason: result.stopReason, nextAction: result.nextAction }, status, includeEvents));

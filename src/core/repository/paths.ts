@@ -11,12 +11,14 @@ export function stonvikPaths(root: string) {
   return {
     root, product, inbox, inboxReview, specs, adrs, features, definitions,
     runtime: path.join(root, ".stonvik", "runtime"),
+    claims: path.join(root, ".stonvik", "runtime", "claims"),
     events: path.join(product, "events"),
     inboxReceipts: path.join(product, "inbox-receipts"),
     featureStateDir: (state: string) => path.join(features, state),
     featureDir: (state: string, slug: string) => path.join(features, state, slug),
     definitionDir: (slug: string) => path.join(definitions, slug),
     requiredDirs: [inbox, definitions, ...FEATURE_STATES.map((s) => path.join(features, s))],
-    createdDirs: [inbox, inboxReview, path.join(product, "inbox-receipts"), path.join(product, "events"), definitions, ...FEATURE_STATES.map((s) => path.join(features, s))]
+    createdDirs: [inbox, inboxReview, path.join(product, "inbox-receipts"), path.join(product, "events"), definitions, ...FEATURE_STATES.map((s) => path.join(features, s))],
+    claimPath: (workId: string) => path.join(root, ".stonvik", "runtime", "claims", `${workId}.json`),
   };
 }
