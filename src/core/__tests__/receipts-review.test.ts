@@ -3,11 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { describe, expect, it } from "vitest";
-import { FilesystemForgiumRepository } from "../../core/index.js";
+import { FilesystemStonvikRepository } from "../../core/index.js";
 
 async function tempRepo() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-receipts-test-"));
-  const repo = new FilesystemForgiumRepository(root);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-receipts-test-"));
+  const repo = new FilesystemStonvikRepository(root);
   await repo.init();
   return { root, repo };
 }

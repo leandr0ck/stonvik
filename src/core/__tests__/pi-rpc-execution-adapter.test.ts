@@ -2,24 +2,24 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { FilesystemForgiumRepository, PiRpcExecutionAdapter, buildPiPrompt, parsePiResult } from "../../core/index.js";
+import { FilesystemStonvikRepository, PiRpcExecutionAdapter, buildPiPrompt, parsePiResult } from "../../core/index.js";
 
 describe("Pi RPC execution adapter", () => {
   it("maps the documented RPC event stream to a typed result", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-pi-rpc-test-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-pi-rpc-test-"));
     const fakePi = path.join(root, "fake-pi");
     const fakeSource = [
       "#!/usr/bin/env node",
       "if (process.argv.includes('--version')) { console.log('0.80.6'); process.exit(0); }",
       "process.stdin.on('data', () => {",
-      "  process.stdout.write(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: 'FORGIUM_RESULT: completed' }] }] }) + '\\n');",
+      "  process.stdout.write(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: 'STONVIK_RESULT: completed' }] }] }) + '\\n');",
       "  process.stdout.write(JSON.stringify({ type: 'agent_settled' }) + '\\n');",
       "});",
       ""
     ].join("\n");
     await fs.writeFile(fakePi, fakeSource);
     await fs.chmod(fakePi, 0o755);
-    const repo = new FilesystemForgiumRepository(root);
+    const repo = new FilesystemStonvikRepository(root);
     await repo.init();
     const feature = await repo.createFeature({ title: "Pi work", goal: "Run Pi safely.", acceptance: ["The result is typed"], verification: { commands: [{ name: "pass", run: "true" }] } });
     const adapter = new PiRpcExecutionAdapter(fakePi, 5_000);
@@ -34,8 +34,8 @@ describe("Pi RPC execution adapter", () => {
   });
 
   it("includes the Feature contract in the prompt", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-pi-prompt-test-"));
-    const repo = new FilesystemForgiumRepository(root);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-pi-prompt-test-"));
+    const repo = new FilesystemStonvikRepository(root);
     await repo.init();
     const feature = await repo.createFeature({ title: "Prompt work", goal: "Provide context.", acceptance: ["Context is present"], verification: { commands: [{ name: "pass", run: "true" }] } });
     const profile = await repo.inspectExecutionMode(feature.id);
@@ -43,6 +43,6 @@ describe("Pi RPC execution adapter", () => {
     const prompt = buildPiPrompt({ root, feature, profile, runId: "run-test", permissions: "repository" });
 
     expect(prompt).toContain(feature.manifest.goal);
-    expect(prompt).toContain("FORGIUM_RESULT");
+    expect(prompt).toContain("STONVIK_RESULT");
   });
 });

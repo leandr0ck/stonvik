@@ -1,24 +1,17 @@
-# Forgium — instrucciones para agentes de código
+# Stonvik — instrucciones para agentes de código
 
 ## Propósito y fuentes de verdad
 
-Forgium es un motor de workflow nativo del repositorio para agentes de
+Stonvik es un motor de workflow nativo del repositorio para agentes de
 desarrollo. El estado durable vive en archivos del repositorio; los agentes no
 deben tratar el historial de conversación como fuente de verdad.
 
-Lee primero [docs/README.md](docs/README.md). Dentro de la documentación del
-repositorio, usa este orden de precedencia:
+Lee primero [README.md](README.md). El código, los tipos, los schemas y las
+pruebas son la fuente de verdad operativa. El README conserva únicamente la
+filosofía del proyecto; no sustituye el comportamiento implementado.
 
-1. ADRs en `docs/adr/`.
-2. Planes en `docs/plans/`.
-3. `loop-technical-spec.md` (especificación histórica de base).
-4. `README.md`.
-5. Código existente.
-
-Los ADRs son normativos cuando contradicen la especificación histórica o el
-código. Señala la divergencia y actualiza la documentación pertinente al
-implementar una decisión. No inventes arquitectura, estados o transiciones que
-no estén documentados; pide aclaración si falta una decisión necesaria.
+No inventes arquitectura, estados o transiciones: pide aclaración si el código
+y las pruebas no permiten establecer una decisión necesaria.
 
 ## Reglas de implementación
 
@@ -32,7 +25,7 @@ no estén documentados; pide aclaración si falta una decisión necesaria.
 - Escribe archivos de estado de forma atómica y valida su esquema antes de
   persistirlos.
 - No agregues dependencias de producción, renombres públicos ni cambios de
-  estructura amplios sin justificación explícita y actualización de docs/ADR.
+  estructura amplios sin justificación explícita.
 - No descartes, reviertas ni reformatees cambios ajenos del working tree.
 
 ## Invariantes de dominio
@@ -46,10 +39,10 @@ no estén documentados; pide aclaración si falta una decisión necesaria.
   No permitas `doing → done`: debe pasar por `review` y tener una decisión
   registrada.
 - El estado durable y la evidencia versionable pertenecen al repositorio. Los
-  leases y logs locales son efímeros y viven bajo `.forgium/runtime/`.
+  leases y logs locales son efímeros y viven bajo `.stonvik/runtime/`.
 - Un implementador no puede autoaprobar su trabajo. `done` requiere review y
   receipts/evidencia según los ADRs.
-- Git es opcional para ejecutar Forgium; si existe, solo ayuda a descubrir la
+- Git es opcional para ejecutar Stonvik; si existe, solo ayuda a descubrir la
   raíz del proyecto.
 
 ## Convenciones de código
@@ -67,7 +60,7 @@ no estén documentados; pide aclaración si falta una decisión necesaria.
 
 - No releas, parsees y reescribas un log histórico por cada evento. Los
   eventos durables se particionan por fecha y `runId`; el stream se escribe de
-  forma incremental y `forgium validate` conserva la auditoría completa.
+  forma incremental y `stonvik validate` conserva la auditoría completa.
 - El schema valida forma, no todas las invariantes de dominio. Antes de
   persistir una clasificación o incluirla en un `manifest`, aplica la
   validación semántica determinista (sizing, ruta y `complexityScore`).
@@ -97,8 +90,7 @@ una implementación incorrecta.
 
 ## Documentación y cierre
 
-- Actualiza un ADR o plan si cambian una decisión, contrato, estado, comando o
-  artefacto persistido.
-- No copies ADRs extensos en este archivo; enlázalos desde aquí o desde docs.
+- Mantén el README limitado a concepto y filosofía; la documentación de
+  comportamiento pertenece al código, tipos, schemas y pruebas.
 - Al cerrar, indica archivos cambiados, decisiones relevantes y comandos de
   verificación ejecutados con su resultado.

@@ -1,10 +1,10 @@
 {
-  "name": "forgium",
+  "name": "stonvik",
   "version": "1.0.0",
   "description": "Repository-native workflow engine for software development agents.",
   "type": "module",
   "bin": {
-    "forgium": "dist/cli/index.js"
+    "stonvik": "dist/cli/index.js"
   },
   "files": [
     "dist",
@@ -15,12 +15,12 @@
     "test": "npm run build && vitest run",
     "dev": "tsx src/cli/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e:product": "npm run build && FORGIUM_E2E_DIST=1 vitest run src/core/__tests__/product-loop-e2e.test.ts",
-    "test:e2e:implementation": "npm run build && FORGIUM_E2E_DIST=1 vitest run src/core/__tests__/implementation-observation-e2e.test.ts",
+    "test:e2e:product": "npm run build && STONVIK_E2E_DIST=1 vitest run src/core/__tests__/product-loop-e2e.test.ts",
+    "test:e2e:implementation": "npm run build && STONVIK_E2E_DIST=1 vitest run src/core/__tests__/implementation-observation-e2e.test.ts",
     "test:e2e:autonomous": "npm run build && vitest run src/core/__tests__/autonomous-run-loop.test.ts",
-    "test:e2e:implementation:pi": "npm run build && FORGIUM_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-implement-e2e.test.ts --testTimeout=150000",
+    "test:e2e:implementation:pi": "npm run build && STONVIK_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-implement-e2e.test.ts --testTimeout=150000",
     "test:e2e:real": "npm run build && vitest run src/core/__tests__/real-run-e2e.test.ts --testTimeout=30000",
-    "test:e2e:live": "npm run build && FORGIUM_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-implement-e2e.test.ts --maxWorkers=1 --testTimeout=180000",
+    "test:e2e:live": "npm run build && STONVIK_E2E_PI=1 vitest run src/core/__tests__/pi-spec-flow-implement-e2e.test.ts --maxWorkers=1 --testTimeout=180000",
     "test:e2e:offline": "npm run build && vitest run src/core/__tests__/cli-contract-e2e.test.ts src/core/__tests__/watch-cli-e2e.test.ts --testTimeout=60000",
     "test:release": "npm test && npm run typecheck && npm run build && git diff --check && npm run test:e2e:real"
   },

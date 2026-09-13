@@ -4,24 +4,24 @@ import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
-import { AgentLoop, ExecutionAdapterRegistry, FilesystemForgiumRepository, ForgiumError, SpecFlowExecutionAdapter, findRepositoryRoot, type Classification, type FeatureState, type InboxItem, type RunEvent } from "../core/index.js";
+import { AgentLoop, ExecutionAdapterRegistry, FilesystemStonvikRepository, StonvikError, SpecFlowExecutionAdapter, findRepositoryRoot, type Classification, type FeatureState, type InboxItem, type RunEvent } from "../core/index.js";
 
 interface GlobalOptions { root?: string; json?: boolean }
 
 const program = new Command();
 program
-  .name("forgium")
+  .name("stonvik")
   .description("Repository-native workflow engine for software development agents")
   .version("1.0.0")
   .option("--root <path>", "repository root override")
   .option("--json", "emit JSON output");
 
 program.command("init")
-  .description("Initialize Forgium structures in the repository")
+  .description("Initialize Stonevik structures in the repository")
   .action(async () => {
     const repo = await repoForCommand();
     await repo.init();
-    output({ initialized: true, root: repo.root }, `Initialized Forgium in ${repo.root}`);
+    output({ initialized: true, root: repo.root }, `Initialized Stonevik in ${repo.root}`);
   });
 
 program.command("capture")
@@ -49,8 +49,44 @@ inbox.command("answer <inboxId> <answer...>")
     const item = await repo.answerInboxClarification(inboxId, answer.join(" "));
     output(item, `Recorded clarification for ${item.id}`);
   });
+inbox.command("review")
+  .description("List Inbox items needing human review")
+  .action(async () => {
+    const repo = await repoForCommand();
+    const items = await repo.listReview();
+    const text = items.length
+      ? items.map((i) => {
+        const question = i.body?.match(/\n> (.+)/g)?.map((l) => l.replace(/^> /, "")).join(" | ") ?? "";
+        return `  ${i.id} (${i.status})${question ? ` — ${question}` : ""}\n    File: ${i.path}`;
+      }).join("\n\n")
+      : "No Inbox items in review.";
+    output(items, `Inbox items needing review (${items.length})\n\n${text}`);
+  });
+inbox.command("confirm <inboxId>")
+  .description("Confirm a definition and move the Inbox item back from review")
+  .action(async (inboxId: string) => {
+    const repo = await repoForCommand();
+    const item = (await repo.listReview()).find((i) => i.id === inboxId);
+    if (!item) throw new StonvikError(`Inbox item is not in review: ${inboxId}`, "NOT_IN_REVIEW", 2);
+    if (item.status === "needs_definition") {
+      const feature = await repo.confirmDefinitionForInbox(inboxId);
+      output(feature, `Confirmed definition and created Work ${feature.id}`);
+    } else {
+      const restored = await repo.moveReviewToInbox(item);
+      output(restored, `Moved ${restored.id} back to inbox (captured)`);
+    }
+  });
+inbox.command("restore <inboxId>")
+  .description("Move an Inbox item from review back to the inbox without changes")
+  .action(async (inboxId: string) => {
+    const repo = await repoForCommand();
+    const item = (await repo.listReview()).find((i) => i.id === inboxId);
+    if (!item) throw new StonvikError(`Inbox item is not in review: ${inboxId}`, "NOT_IN_REVIEW", 2);
+    const restored = await repo.moveReviewToInbox(item);
+    output(restored, `Moved ${restored.id} back to inbox (captured)`);
+  });
 
-const migrate = program.command("migrate").description("Migrate durable Forgium state to the current layout");
+const migrate = program.command("migrate").description("Migrate durable Stonevik state to the current layout");
 migrate.command("inbox-provenance")
   .description("Move legacy promoted Inbox items and classification receipts into their Work")
   .action(async () => {
@@ -75,9 +111,9 @@ definition.command("edit <inboxId>")
   .action(async (inboxId: string) => {
     const repo = await repoForCommand();
     const item = (await repo.listInbox()).find((candidate) => candidate.id === inboxId);
-    if (!item || item.status !== "needs_definition" || !item.definitionRef) throw new ForgiumError(`Inbox item has no pending definition: ${inboxId}`, "DEFINITION_NOT_PENDING", 2);
+    if (!item || (item.status !== "needs_definition" && item.status !== "needs_review") || !item.definitionRef) throw new StonvikError(`Inbox item has no pending definition: ${inboxId}`, "DEFINITION_NOT_PENDING", 2);
     const editor = process.env.EDITOR ?? process.env.VISUAL;
-    if (!editor) throw new ForgiumError("Set VISUAL or EDITOR before editing a definition.", "EDITOR_NOT_CONFIGURED", 2);
+    if (!editor) throw new StonvikError("Set VISUAL or EDITOR before editing a definition.", "EDITOR_NOT_CONFIGURED", 2);
     execFileSync(editor, [path.resolve(repo.root, item.definitionRef)], { cwd: repo.root, stdio: "inherit" });
     output({ inboxId: item.id, definitionRef: item.definitionRef }, `Edited ${item.definitionRef}`);
   });
@@ -91,7 +127,7 @@ program.command("run")
   .action(async (opts: { nonInteractive?: boolean; dryRun?: boolean; watch?: boolean; progress: ProgressMode }) => {
     const requestedProgress = parseProgressMode(opts.progress);
     const progress: ProgressMode = opts.watch && requestedProgress === "auto" && program.opts<GlobalOptions>().json ? "ndjson" : requestedProgress;
-    if (progress === "ndjson" && !program.opts<GlobalOptions>().json) throw new ForgiumError("--progress ndjson requires --json.", "PROGRESS_NDJSON_REQUIRES_JSON", 2);
+    if (progress === "ndjson" && !program.opts<GlobalOptions>().json) throw new StonvikError("--progress ndjson requires --json.", "PROGRESS_NDJSON_REQUIRES_JSON", 2);
     const repo = await repoForCommand();
     let interrupted = false;
     const controller = new AbortController();
@@ -136,11 +172,11 @@ program.command("status")
   });
 
 program.command("validate")
-  .description("Validate Forgium repository structures and schemas")
+  .description("Validate Stonevik repository structures and schemas")
   .action(async () => {
     const repo = await repoForCommand();
     const report = await repo.validate();
-    output(report, report.valid ? "Forgium repository is valid" : report.issues.map((i) => `${i.severity.toUpperCase()} ${i.code}: ${i.message}`).join("\n"));
+    output(report, report.valid ? "Stonevik repository is valid" : report.issues.map((i) => `${i.severity.toUpperCase()} ${i.code}: ${i.message}`).join("\n"));
     if (!report.valid) process.exitCode = 2;
   });
 
@@ -174,10 +210,10 @@ program.command("implement [id]")
   .description("Start or observe a spec-driven implementation without controlling its internal ticket flow")
   .option("--engine <engine>", "implementation engine", "pi-spec-flow")
   .action(async (id: string | undefined, opts: { engine: string }) => {
-    if (opts.engine !== "pi-spec-flow") throw new ForgiumError(`Unsupported implementation engine: ${opts.engine}`, "IMPLEMENT_ENGINE_INVALID", 2);
+    if (opts.engine !== "pi-spec-flow") throw new StonvikError(`Unsupported implementation engine: ${opts.engine}`, "IMPLEMENT_ENGINE_INVALID", 2);
     const repo = await repoForCommand();
     const active = await repo.listFeatures("doing");
-    if (!id && active.length > 1) throw new ForgiumError("Multiple Work items are in progress. Pass an explicit Work ID.", "IMPLEMENT_SELECTION_REQUIRED", 2);
+    if (!id && active.length > 1) throw new StonvikError("Multiple Work items are in progress. Pass an explicit Work ID.", "IMPLEMENT_SELECTION_REQUIRED", 2);
     const feature = id ? await repo.getFeature(id) : active[0] ?? await repo.getNextReady();
     if (!feature) return output({ status: "idle" }, "No Work is ready or in progress");
     const result = await repo.executeFeature(feature.id, new ExecutionAdapterRegistry([new SpecFlowExecutionAdapter()]));
@@ -187,7 +223,21 @@ program.command("implement [id]")
     );
   });
 
-program.command("review <id>")
+program.command("review")
+  .description("List Inbox items needing human review (alias for inbox review)")
+  .action(async () => {
+    const repo = await repoForCommand();
+    const items = await repo.listReview();
+    const text = items.length
+      ? items.map((i) => {
+        const question = i.body?.match(/\n> (.+)/g)?.map((l) => l.replace(/^> /, "")).join(" | ") ?? "";
+        return `  ${i.id} (${i.status})${question ? ` — ${question}` : ""}\n    File: ${i.path}`;
+      }).join("\n\n")
+      : "No Inbox items in review.";
+    output(items, `Inbox items needing review (${items.length})\n\n${text}`);
+  });
+
+program.command("work-review <id>")
   .description("Record an explicit implementation review decision")
   .option("--fail", "send Work back to doing")
   .option("--block <reason>", "block Work with a reason")
@@ -197,12 +247,12 @@ program.command("review <id>")
       ? await repo.reviewFeature(id, "blocked", opts.block)
       : opts.fail
         ? await repo.reviewFeature(id, "changes_requested", "Review requested changes.")
-        : await repo.reviewFeature(id, "approved", "Review approved via Forgium CLI.");
+        : await repo.reviewFeature(id, "approved", "Review approved via Stonevik CLI.");
     output(result, `${opts.block ? "Blocked" : opts.fail ? "Returned to doing" : "Completed"} ${result.id}`);
   });
 
 program.parseAsync(process.argv).catch((error) => {
-  if (error instanceof ForgiumError) {
+  if (error instanceof StonvikError) {
     const json = program.opts<GlobalOptions>().json;
     if (json) console.error(JSON.stringify({ error: { code: error.code, message: error.message } }, null, 2));
     else console.error(`${error.code}: ${error.message}`);
@@ -212,10 +262,10 @@ program.parseAsync(process.argv).catch((error) => {
   process.exit(1);
 });
 
-async function repoForCommand(): Promise<FilesystemForgiumRepository> {
+async function repoForCommand(): Promise<FilesystemStonvikRepository> {
   const opts = program.opts<GlobalOptions>();
   const root = opts.root ? path.resolve(opts.root) : await findRepositoryRoot(process.cwd()).catch(() => process.cwd());
-  return new FilesystemForgiumRepository(root);
+  return new FilesystemStonvikRepository(root);
 }
 
 function output(data: unknown, human: string): void { if (program.opts<GlobalOptions>().json) console.log(JSON.stringify(data, null, 2)); else console.log(human); }
@@ -223,7 +273,7 @@ function relative(root: string, p: string): string { return path.relative(root, 
 
 function parseProgressMode(value: string | undefined): ProgressMode {
   if (value === "auto" || value === "off" || value === "plain" || value === "ndjson") return value;
-  throw new ForgiumError(`Invalid progress mode: ${value}. Use auto, off, plain, or ndjson.`, "PROGRESS_MODE_INVALID", 2);
+  throw new StonvikError(`Invalid progress mode: ${value}. Use auto, off, plain, or ndjson.`, "PROGRESS_MODE_INVALID", 2);
 }
 
 function renderProgress(event: RunEvent, mode: ProgressMode): void {
@@ -240,9 +290,9 @@ function renderProgress(event: RunEvent, mode: ProgressMode): void {
   target.write(`[${event.phase ?? event.type}]${subject ? ` ${subject}` : ""} — ${event.message}\n`);
   if (event.nextAction) target.write(`  Next: ${event.nextAction}\n`);
 }
-function renderStatus(status: Awaited<ReturnType<FilesystemForgiumRepository["getStatus"]>>, implementations?: Array<{ id: string; state: FeatureState; observation?: unknown; nextAction: string }>): string {
+function renderStatus(status: Awaited<ReturnType<FilesystemStonvikRepository["getStatus"]>>, implementations?: Array<{ id: string; state: FeatureState; observation?: unknown; nextAction: string }>): string {
   const details = implementations?.length ? `\n\nImplementation\n${implementations.map((item) => `  ${item.id}: ${item.state} — ${item.nextAction}`).join("\n")}` : "";
-  return `Inbox\n  captured: ${status.inbox.captured ?? 0}\n  needs clarification: ${status.inbox.needs_clarification ?? 0}\n  needs definition: ${status.inbox.needs_definition ?? 0}\n  promoted: ${status.inbox.promoted ?? 0}\n  merged: ${status.inbox.merged ?? 0}\n  deferred: ${status.inbox.deferred ?? 0}\n  rejected: ${status.inbox.rejected ?? 0}\n\nWork\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}\n  done: ${status.features.done}${details}`;
+  return `Inbox\n  captured: ${status.inbox.captured ?? 0}\n  needs clarification: ${status.inbox.needs_clarification ?? 0}\n  needs definition: ${status.inbox.needs_definition ?? 0}\n  in review: ${status.inbox.needs_review ?? 0}\n  promoted: ${status.inbox.promoted ?? 0}\n  merged: ${status.inbox.merged ?? 0}\n  deferred: ${status.inbox.deferred ?? 0}\n  rejected: ${status.inbox.rejected ?? 0}\n\nWork\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}\n  done: ${status.features.done}${details}`;
 }
 
 interface TriageOptions { nonInteractive?: boolean; dryRun?: boolean }
@@ -251,9 +301,9 @@ interface TriageResult { root: string; actions: TriageAction[]; stopReason: stri
 type ProgressMode = "auto" | "off" | "plain" | "ndjson";
 interface RunOptions { nonInteractive?: boolean; dryRun?: boolean; watch?: boolean; progress?: ProgressMode; signal?: AbortSignal }
 interface RunFeature { id: string; state: FeatureState; action: string }
-interface RunResult { root: string; actions: TriageAction[]; features: RunFeature[]; stopReason: string; nextAction?: string; events?: RunEvent[] }
+interface RunResult { root: string; actions: TriageAction[]; features: RunFeature[]; inboxReview: number; stopReason: string; nextAction?: string; events?: RunEvent[] }
 
-async function triage(repo: FilesystemForgiumRepository, options: TriageOptions): Promise<TriageResult> {
+async function triage(repo: FilesystemStonvikRepository, options: TriageOptions): Promise<TriageResult> {
   const result: TriageResult = { root: repo.root, actions: [], stopReason: "no_actionable_work" };
   const inbox = await repo.listInbox();
   const prompt = createPromptSession();
@@ -298,7 +348,7 @@ async function triage(repo: FilesystemForgiumRepository, options: TriageOptions)
       const action = await prompt.ask(`Inbox ${item.id} (${item.title}): create [w]ork [s]pec [a]dr [d]efer [r]eject [m]erge [q]uit `, true);
       if (action === "s" || action === "a") {
         const definitionKind = action === "s" ? "spec" : "adr";
-        const needsDefinition = await repo.requireDefinitionForInbox(item.id, definitionKind, !process.env.FORGIUM_PI_COMMAND);
+        const needsDefinition = await repo.requireDefinitionForInbox(item.id, definitionKind, !process.env.STONVIK_PI_COMMAND);
         result.actions.push({ kind: "inbox", id: item.id, action: "needs_definition", definitionRef: needsDefinition.definitionRef, definitionKind });
       } else if (action === "w" || action === "t") {
         const definition = await defineWork(prompt.ask);
@@ -336,77 +386,50 @@ async function triage(repo: FilesystemForgiumRepository, options: TriageOptions)
   return result;
 }
 
-async function runLoop(repo: FilesystemForgiumRepository, options: RunOptions, isInterrupted = () => false): Promise<RunResult> {
+async function runLoop(repo: FilesystemStonvikRepository, options: RunOptions, isInterrupted = () => false): Promise<RunResult> {
   // Without a configured agent, preserve a safe human-only recovery pass. The
-  // autonomous path is selected as soon as FORGIUM_PI_COMMAND is configured;
+  // autonomous path is selected as soon as STONVIK_PI_COMMAND is configured;
   // no unstructured local process is treated as a state authority.
-  if (!process.env.FORGIUM_PI_COMMAND && !process.stdin.isTTY && options.progress !== "plain" && options.progress !== "ndjson") {
-    const triageResult = await triage(repo, { nonInteractive: options.nonInteractive, dryRun: options.dryRun });
-    const ready = await repo.listFeatures("ready");
-    return {
-      root: repo.root,
-      actions: triageResult.actions,
-      features: ready.map((feature) => ({ id: feature.id, state: feature.state, action: "ready_for_implementation" })),
-      stopReason: options.dryRun ? "dry_run" : triageResult.actions.some((action) => action.action === "needs_definition" || action.action === "needs_definition_confirmation") ? "human_definition_required" : triageResult.stopReason === "no_actionable_work" && ready.length ? "ready_for_implementation" : triageResult.stopReason,
-    };
-  }
-  const prompt = createPromptSession();
-  try {
-    const loop = new AgentLoop(repo);
-    const events: RunEvent[] = [];
-    const progress = options.progress ?? "auto";
-    const stream = progress === "plain" || progress === "ndjson" || (progress === "auto" && Boolean(process.stdout.isTTY));
-    const result = await loop.run({
-      dryRun: options.dryRun,
-      nonInteractive: options.nonInteractive,
-      signal: options.signal ?? (isInterrupted() ? AbortSignal.abort() : undefined),
-      chooseClassification: async (item, classification) => chooseClassification(prompt, item, classification),
-      answerClarification: async (_item, question) => prompt.ask(`${question} `),
-      confirmDefinition: async (item) => (await prompt.ask(`Definición ${item.definitionRef}: [c]onfirmar [s]altar [q]salir `, true)) === "c",
-      onEvent: (event) => {
-        events.push(event);
-        if (stream) renderProgress(event, progress);
-      },
-    });
-    return {
-      root: result.root,
-      actions: result.actions.map((action) => ({ kind: "inbox" as const, id: action.id, action: action.action, definitionRef: action.definitionRef, definitionKind: action.definitionKind })),
-      features: result.features,
-      stopReason: result.stopReason,
-      nextAction: result.nextAction,
-      events,
-    };
-  } finally { prompt.close(); }
+  const loop = new AgentLoop(repo);
+  const events: RunEvent[] = [];
+  const progress = options.progress ?? "auto";
+  const stream = progress === "plain" || progress === "ndjson" || (progress === "auto" && Boolean(process.stdout.isTTY));
+  const result = await loop.run({
+    dryRun: options.dryRun,
+    nonInteractive: options.nonInteractive,
+    signal: options.signal ?? (isInterrupted() ? AbortSignal.abort() : undefined),
+    onEvent: (event) => {
+      events.push(event);
+      if (stream) renderProgress(event, progress);
+    },
+  });
+  return {
+    root: result.root,
+    actions: result.actions.map((action) => ({ kind: "inbox" as const, id: action.id, action: action.action, definitionRef: action.definitionRef, definitionKind: action.definitionKind })),
+    features: result.features,
+    inboxReview: result.inboxReview,
+    stopReason: result.stopReason,
+    nextAction: result.nextAction,
+    events,
+  };
 }
 
-async function chooseClassification(prompt: ReturnType<typeof createPromptSession>, item: InboxItem, classification: Classification): Promise<"direct" | "spec" | "adr" | "split" | "defer" | "reject" | "quit"> {
-  const risks = classification.risks.length ? classification.risks.join(", ") : "sin riesgos";
-  const answer = await prompt.ask(`Inbox ${item.id}: ${classification.route}/${classification.size}, ${risks}. ${classification.rationale.join(" ")} [d]irect [s]pec [a]dr [p]artir [f]iferir [r]echazar [q]salir `, true);
-  return answer === "d" ? "direct" : answer === "s" ? "spec" : answer === "a" ? "adr" : answer === "p" ? "split" : answer === "f" ? "defer" : answer === "r" ? "reject" : "quit";
-}
-
-async function watchLoop(repo: FilesystemForgiumRepository, options: RunOptions, interrupted: () => boolean): Promise<void> {
+async function watchLoop(repo: FilesystemStonvikRepository, options: RunOptions, interrupted: () => boolean): Promise<void> {
   let fingerprint = await durableFingerprint(repo.root);
   const run = async () => {
     const events = [] as unknown[];
     const loop = new AgentLoop(repo);
-    const prompt = createPromptSession();
-    try {
-      const progress = options.progress ?? (program.opts<GlobalOptions>().json ? "ndjson" : "plain");
-      const stream = progress !== "off";
-      const result = await loop.run({
-        dryRun: options.dryRun,
-        nonInteractive: options.nonInteractive,
-        chooseClassification: async (item, classification) => chooseClassification(prompt, item, classification),
-        answerClarification: async (_item, question) => prompt.ask(`${question} `),
-        confirmDefinition: async (item) => (await prompt.ask(`Definición ${item.definitionRef}: [c]onfirmar [s]altar [q]salir `, true)) === "c",
-        signal: options.signal,
-        onEvent: async (event) => { events.push(event); if (stream) renderProgress(event, progress); },
-      });
-      const status = await repo.getStatus();
-      const includeEvents = result.stopReason !== "idle" && !stream && progress !== "off";
-      if (progress !== "ndjson") console.log(renderRun({ root: result.root, actions: result.actions.map((a) => ({ kind: "inbox", id: a.id, action: a.action, definitionRef: a.definitionRef, definitionKind: a.definitionKind })), features: result.features, stopReason: result.stopReason, nextAction: result.nextAction }, status, includeEvents));
-    } finally { prompt.close(); }
+    const progress = options.progress ?? (program.opts<GlobalOptions>().json ? "ndjson" : "plain");
+    const stream = progress !== "off";
+    const result = await loop.run({
+      dryRun: options.dryRun,
+      nonInteractive: options.nonInteractive,
+      signal: options.signal,
+      onEvent: async (event) => { events.push(event); if (stream) renderProgress(event, progress); },
+    });
+    const status = await repo.getStatus();
+    const includeEvents = result.stopReason !== "idle" && !stream && progress !== "off";
+    if (progress !== "ndjson") console.log(renderRun({ root: result.root, actions: result.actions.map((a) => ({ kind: "inbox", id: a.id, action: a.action, definitionRef: a.definitionRef, definitionKind: a.definitionKind })), features: result.features, inboxReview: result.inboxReview, stopReason: result.stopReason, nextAction: result.nextAction }, status, includeEvents));
   };
   await run();
   fingerprint = await durableFingerprint(repo.root);
@@ -444,7 +467,7 @@ async function durableFingerprint(root: string): Promise<string> {
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return; }
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".forgium") continue;
+      if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".stonvik") continue;
       const full = path.join(directory, entry.name);
       if (entry.isDirectory()) walk(full);
       else { try { const stat = fs.statSync(full); parts.push(`${path.relative(root, full)}:${stat.size}:${stat.mtimeMs}`); } catch { /* raced with writer */ } }
@@ -514,10 +537,10 @@ function collectOption(value: string, previous: string[]): string[] { return [..
 function buildVerification(commands: string[], manualEvidence: string[]) {
   const requiredEvidence = manualEvidence.map((value) => {
     const delimiter = value.lastIndexOf(":");
-    if (delimiter <= 0 || delimiter === value.length - 1) throw new ForgiumError("Manual evidence must use criterion:kind.", "VERIFICATION_INVALID", 2);
+    if (delimiter <= 0 || delimiter === value.length - 1) throw new StonvikError("Manual evidence must use criterion:kind.", "VERIFICATION_INVALID", 2);
     return { criterion: value.slice(0, delimiter).trim(), kind: value.slice(delimiter + 1).trim() };
   });
-  if (!commands.length && !requiredEvidence.length) throw new ForgiumError("Work requires a verification command or manual evidence.", "VERIFICATION_REQUIRED", 2);
+  if (!commands.length && !requiredEvidence.length) throw new StonvikError("Work requires a verification command or manual evidence.", "VERIFICATION_REQUIRED", 2);
   return {
     commands: commands.map((run, index) => ({ name: `command-${index + 1}`, run })),
     requiredEvidence: requiredEvidence.length ? requiredEvidence : undefined,
@@ -525,14 +548,15 @@ function buildVerification(commands: string[], manualEvidence: string[]) {
 }
 
 function renderTriage(result: TriageResult): string {
-  return `Forgium triage\n  Actions: ${result.actions.length}${renderSpecActions(result.actions)}\n  Stop: ${result.stopReason}`;
+  return `Stonevik triage\n  Actions: ${result.actions.length}${renderSpecActions(result.actions)}\n  Stop: ${result.stopReason}`;
 }
-function renderRun(result: RunResult, status: Awaited<ReturnType<FilesystemForgiumRepository["getStatus"]>>, includeEvents = true): string {
-  const inboxNeedingAttention = (status.inbox.captured ?? 0) + (status.inbox.needs_clarification ?? 0) + (status.inbox.needs_definition ?? 0);
+function renderRun(result: RunResult, status: Awaited<ReturnType<FilesystemStonvikRepository["getStatus"]>>, includeEvents = true): string {
+  const inboxNeedingAttention = (status.inbox.captured ?? 0) + (status.inbox.needs_clarification ?? 0) + (status.inbox.needs_definition ?? 0) + (status.inbox.needs_review ?? 0);
   const workNeedingAttention = status.features.ready + status.features.doing + status.features.review + status.features.blocked;
   const noActionRequired = inboxNeedingAttention === 0 && workNeedingAttention === 0;
+  const reviewCount = result.inboxReview ?? 0;
   const events = includeEvents && result.events?.length ? `\n\nEvents\n${result.events.map((event) => `  [${event.type}] ${event.message}${event.nextAction ? `\n    Next: ${event.nextAction}` : ""}`).join("\n")}` : "";
-  return `Forgium status after run\n\nInbox\n  captured: ${status.inbox.captured ?? 0}\n  awaiting clarification: ${status.inbox.needs_clarification ?? 0}\n  awaiting definition: ${status.inbox.needs_definition ?? 0}\n\nWork requiring attention\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}${noActionRequired ? "\n\n  No action required." : ""}${result.nextAction ? `\n\nNext: ${result.nextAction}` : ""}${events}`;
+  return `Stonevik status after run\n\nInbox\n  captured: ${status.inbox.captured ?? 0}\n  awaiting clarification: ${status.inbox.needs_clarification ?? 0}\n  awaiting definition: ${status.inbox.needs_definition ?? 0}\n  in review: ${status.inbox.needs_review ?? 0}\n\nWork requiring attention\n  ready: ${status.features.ready}\n  doing: ${status.features.doing}\n  review: ${status.features.review}\n  blocked: ${status.features.blocked}${reviewCount > 0 ? `\n\nInbox review: ${reviewCount} item(s) need attention — run \`stonvik review\` to see them.` : ""}${noActionRequired && reviewCount === 0 ? "\n\n  No action required." : ""}${result.nextAction ? `\n\nNext: ${result.nextAction}` : ""}${events}`;
 }
 function renderSpecActions(actions: TriageAction[]): string {
   const definitions = actions.filter((action) => action.definitionRef).map((action) => `${action.definitionKind}: ${action.definitionRef}`);

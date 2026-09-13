@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
-const e2e = process.env.FORGIUM_E2E_PI === "1" ? it : it.skip;
+const e2e = process.env.STONVIK_E2E_PI === "1" ? it : it.skip;
 const cliPath = path.resolve(process.cwd(), "dist/cli/index.js");
 
 async function cli(root: string, args: string[], env: NodeJS.ProcessEnv = process.env) {
@@ -20,10 +20,10 @@ async function cli(root: string, args: string[], env: NodeJS.ProcessEnv = proces
   });
 }
 
-describe("Forgium run + real Pi Spec Flow", () => {
+describe("Stonevik run + real Pi Spec Flow", () => {
   e2e("runs Spec Flow through the autonomous loop and requires independent review before done", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-implement-pi-e2e-"));
-    const env = { ...process.env, FORGIUM_PI_COMMAND: process.env.FORGIUM_PI_COMMAND ?? "pi" };
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-implement-pi-e2e-"));
+    const env = { ...process.env, STONVIK_PI_COMMAND: process.env.STONVIK_PI_COMMAND ?? "pi" };
     let passed = false;
     try {
       expect((await cli(root, ["init", "--json"])).code).toBe(0);
@@ -75,7 +75,7 @@ describe("Forgium run + real Pi Spec Flow", () => {
       expect(JSON.parse((await cli(root, ["validate", "--json"], env)).stdout)).toMatchObject({ valid: true });
       passed = true;
     } finally {
-      if (!passed || process.env.FORGIUM_E2E_KEEP === "1") console.error(`Forgium Spec Flow real E2E retained at: ${root}`);
+      if (!passed || process.env.STONVIK_E2E_KEEP === "1") console.error(`Stonevik Spec Flow real E2E retained at: ${root}`);
       else await fs.rm(root, { recursive: true, force: true });
     }
   }, 150_000);

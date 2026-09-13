@@ -6,7 +6,7 @@ import { PiClassificationAdapter } from "../../core/index.js";
 
 describe("PiClassificationAdapter", () => {
   it("reuses one ephemeral RPC process and resets it between Inbox items", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-pi-classification-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-pi-classification-"));
     const counter = path.join(root, "starts");
     const args = path.join(root, "args");
     const command = path.join(root, "fake-pi.mjs");
@@ -38,7 +38,7 @@ describe("PiClassificationAdapter", () => {
   });
 
   it("fails closed when Pi cancels the required fresh session", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-pi-classification-cancelled-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-pi-classification-cancelled-"));
     const command = path.join(root, "fake-pi.mjs");
     await fs.writeFile(command, [
       "#!/usr/bin/env node",
@@ -58,7 +58,7 @@ describe("PiClassificationAdapter", () => {
   });
 
   it("times out instead of hanging when Pi does not acknowledge a session reset", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-pi-classification-timeout-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-pi-classification-timeout-"));
     const command = path.join(root, "fake-pi.mjs");
     await fs.writeFile(command, [
       "#!/usr/bin/env node",

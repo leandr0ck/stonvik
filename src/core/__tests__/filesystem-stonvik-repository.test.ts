@@ -4,21 +4,21 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { FilesystemForgiumRepository } from "../../core/index.js";
+import { FilesystemStonvikRepository } from "../../core/index.js";
 
 const execFile = promisify(execFileCallback);
 
 async function tempRepo() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-test-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-test-"));
   await fs.mkdir(path.join(root, ".git"));
-  const repo = new FilesystemForgiumRepository(root);
+  const repo = new FilesystemStonvikRepository(root);
   await repo.init();
   return { root, repo };
 }
 
-describe("FilesystemForgiumRepository", () => {
+describe("FilesystemStonvikRepository", () => {
   it("initializes and captures work outside a Git repository", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-no-git-test-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-no-git-test-"));
     const cli = path.resolve(process.cwd(), "src/cli/index.ts");
     const tsx = path.resolve(process.cwd(), "node_modules/tsx/dist/cli.mjs");
 
@@ -26,15 +26,15 @@ describe("FilesystemForgiumRepository", () => {
     const { stdout } = await execFile(process.execPath, [tsx, cli, "capture", "Create an example file"], { cwd: root });
 
     expect(stdout).toContain("Captured inbox-");
-    await expect(fs.readdir(path.join(root, "product/inbox"))).resolves.toHaveLength(1);
+    await expect(fs.readdir(path.join(root, "product/inbox"))).resolves.toHaveLength(2); // item.md + review/
   });
 
   it("initializes required directories", async () => {
     const { root } = await tempRepo();
     await expect(fs.stat(path.join(root, "product/inbox"))).resolves.toBeTruthy();
     await expect(fs.stat(path.join(root, "features/ready"))).resolves.toBeTruthy();
-    await expect(fs.readFile(path.join(root, ".gitignore"), "utf8")).resolves.toContain(".forgium/runtime/");
-    await expect(fs.stat(path.join(root, ".forgium"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(path.join(root, ".gitignore"), "utf8")).resolves.toContain(".stonvik/runtime/");
+    await expect(fs.stat(path.join(root, ".stonvik"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("captures and parses inbox items", async () => {
@@ -66,7 +66,7 @@ describe("FilesystemForgiumRepository", () => {
 
     const doing = await repo.startFeature(feature.id);
     expect(doing.state).toBe("doing");
-    await expect(fs.readdir(path.join(root, ".forgium/runtime/runs"))).resolves.toHaveLength(1);
+    await expect(fs.readdir(path.join(root, ".stonvik/runtime/runs"))).resolves.toHaveLength(1);
     expect(await repo.inspectExecutionMode(feature.id)).toEqual({ kind: "direct" });
 
     const review = await repo.submitForReview(feature.id);

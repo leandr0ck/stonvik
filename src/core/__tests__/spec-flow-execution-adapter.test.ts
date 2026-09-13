@@ -3,14 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  FilesystemForgiumRepository,
+  FilesystemStonvikRepository,
   SpecFlowExecutionAdapter,
   buildSpecFlowSafetyPrompt,
   parseSpecFlowStatusResult,
 } from "../../core/index.js";
 
 async function specFlowFixture(status: object) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-spec-flow-adapter-test-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-spec-flow-adapter-test-"));
   const fakePi = path.join(root, "fake-pi");
   const fakeSource = [
     "#!/usr/bin/env node",
@@ -34,7 +34,7 @@ async function specFlowFixture(status: object) {
   await fs.writeFile(fakePi, fakeSource);
   await fs.chmod(fakePi, 0o755);
 
-  const repo = new FilesystemForgiumRepository(root);
+  const repo = new FilesystemStonvikRepository(root);
   await repo.init();
   const feature = await repo.createFeature({
     title: "Spec Flow work",
@@ -103,7 +103,7 @@ describe("Spec Flow execution adapter", () => {
     expect(parseSpecFlowStatusResult(null)).toBeNull();
   });
 
-  it("builds a safety boundary around Forgium-owned state", async () => {
+  it("builds a safety boundary around Stonevik-owned state", async () => {
     const fixture = await specFlowFixture({ complete: true, total: 1 });
 
     expect(buildSpecFlowSafetyPrompt({
@@ -112,6 +112,6 @@ describe("Spec Flow execution adapter", () => {
       profile: fixture.profile,
       runId: "run-spec-flow-test",
       permissions: "repository",
-    })).toContain("Never modify, move, delete, or create files under product/, features/, or .forgium/");
+    })).toContain("Never modify, move, delete, or create files under product/, features/, or .stonvik/");
   });
 });

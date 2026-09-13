@@ -2,7 +2,7 @@ export type FeatureState = "ready" | "doing" | "review" | "blocked" | "done";
 
 export const FEATURE_STATES: FeatureState[] = ["ready", "doing", "review", "blocked", "done"];
 
-export type InboxStatus = "captured" | "needs_clarification" | "needs_definition" | "promoted" | "merged" | "deferred" | "rejected";
+export type InboxStatus = "captured" | "needs_clarification" | "needs_definition" | "needs_review" | "promoted" | "merged" | "deferred" | "rejected";
 export type ClarificationField = "output_path" | "verification" | "scope";
 
 export interface InboxClarification {

@@ -7,11 +7,11 @@ import { describe, expect, it } from "vitest";
 
 const cliPath = path.resolve(process.cwd(), "dist/cli/index.js");
 
-describe("Forgium CLI + Pi RPC contract fixture", () => {
+describe("Stonevik CLI + Pi RPC contract fixture", () => {
   it("runs a captured Inbox through the compiled CLI and a real Pi process", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-real-run-e2e-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-real-run-e2e-"));
     const fixture = await createPiFixture(root);
-    const env = { ...process.env, FORGIUM_PI_COMMAND: fixture.command };
+    const env = { ...process.env, STONVIK_PI_COMMAND: fixture.command, STONVIK_DETERMINISTIC_CLASSIFIER: "0" };
     let passed = false;
     try {
       expect((await cli(root, ["--json", "init"], env)).code).toBe(0);
@@ -28,7 +28,7 @@ describe("Forgium CLI + Pi RPC contract fixture", () => {
       passed = true;
     } finally {
       await fixture.close();
-      if (!passed || process.env.FORGIUM_E2E_KEEP === "1") console.error(`Forgium Pi fixture E2E retained at: ${root}`);
+      if (!passed || process.env.STONVIK_E2E_KEEP === "1") console.error(`Stonevik Pi fixture E2E retained at: ${root}`);
       else await fs.rm(root, { recursive: true, force: true });
     }
   }, 30_000);
@@ -40,12 +40,12 @@ async function createPiFixture(root: string) {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks).toString("utf8");
-    const kind = body.includes("Classify the untrusted Inbox") ? "classification" : body.includes("execution engine for Forgium") ? "execution" : body.includes("independent, read-only Forgium Work reviewer") ? "review" : "unknown";
+    const kind = body.includes("Classify the untrusted Inbox") ? "classification" : body.includes("execution engine for Stonevik") ? "execution" : body.includes("independent, read-only Stonevik Work reviewer") ? "review" : "unknown";
     requests.push(kind);
     const content = kind === "classification"
       ? JSON.stringify({ route: "auto_direct", size: "XS", estimatedTouchedFiles: 1, complexityScore: 1, confidence: 1, risks: [], rationale: ["One requested file."], proposed: { title: "Crear nombres.md", goal: "Crear nombres.md con cinco nombres.", acceptance: ["nombres.md contiene cinco nombres."], verification: { commands: [{ name: "five-names", run: "test \"$(wc -l < nombres.md | tr -d ' ')\" = \"5\"" }] } } })
-      : kind === "execution" ? "FORGIUM_RESULT: completed"
-        : "FORGIUM_REVIEW: {\"outcome\":\"approved\",\"summary\":\"Fixture review approved.\",\"findings\":[],\"evidence\":[\"fixture\"]}";
+      : kind === "execution" ? "STONVIK_RESULT: completed"
+        : "STONVIK_REVIEW: {\"outcome\":\"approved\",\"summary\":\"Fixture review approved.\",\"findings\":[],\"evidence\":[\"fixture\"]}";
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }] })}\n\n`);
     response.end(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);

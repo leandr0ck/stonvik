@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import YAML from "yaml";
 import type { CaptureInput, ClarificationField, Classification, CreateFeatureInput, ExecutionProfile, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, RunEvent, ValidationReport, VerificationReceipt } from "../domain/types.js";
 import { FEATURE_STATES } from "../domain/types.js";
-import { FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, ForgiumNotInitializedError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, LoopAlreadyRunningError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError } from "../errors/forgium-errors.js";
+import { FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, StonvikNotInitializedError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, LoopAlreadyRunningError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError } from "../errors/stonvik-errors.js";
 import { InboxFrontmatterSchema } from "../schemas/inbox.schema.js";
 import { ManifestSchema } from "../schemas/manifest.schema.js";
 import { ReceiptSchema } from "../schemas/receipt.schema.js";
@@ -18,7 +18,7 @@ import { isoNow, shortId, slugify, timestampForFile } from "../services/id.js";
 import { validateClassification } from "../services/classification.js";
 import { specFlowCommandsForSpec } from "../services/spec-flow-commands.js";
 import { canTransition } from "../transitions/transition-rules.js";
-import { forgiumPaths } from "./paths.js";
+import { stonvikPaths } from "./paths.js";
 import type { ExecutionOutcome, ExecutionResult } from "../execution/execution-adapter.js";
 import { ExecutionAdapterRegistry } from "../execution/execution-adapter.js";
 
@@ -27,11 +27,11 @@ const DEFAULT_CHECK_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_SUMMARY_LENGTH = 2_000;
 type RepositoryEventCallback = (event: Omit<RunEvent, "at">, options?: { durable?: boolean }) => Promise<void> | void;
 
-export class FilesystemForgiumRepository {
+export class FilesystemStonvikRepository {
   private readonly paths;
   private readonly eventStreams = new Map<string, { eventIds: Set<string>; lastSequence: number }>();
   private readonly eventWrites = new Map<string, Promise<void>>();
-  constructor(public readonly root: string) { this.paths = forgiumPaths(root); }
+  constructor(public readonly root: string) { this.paths = stonvikPaths(root); }
 
   async init(): Promise<void> {
     for (const dir of this.paths.createdDirs) await fs.mkdir(dir, { recursive: true });
@@ -105,10 +105,12 @@ export class FilesystemForgiumRepository {
 
   async listInbox(): Promise<InboxItem[]> {
     await this.assertInitialized();
-    const entries = await safeReaddir(this.paths.inbox);
     const items: InboxItem[] = [];
-    for (const entry of entries.filter((e) => e.endsWith(".md")).sort()) {
+    for (const entry of (await safeReaddir(this.paths.inbox)).filter((e) => e.endsWith(".md")).sort()) {
       items.push(await this.readInboxFile(path.join(this.paths.inbox, entry)));
+    }
+    for (const entry of (await safeReaddir(this.paths.inboxReview)).filter((e) => e.endsWith(".md")).sort()) {
+      items.push(await this.readInboxFile(path.join(this.paths.inboxReview, entry)));
     }
     return items.sort((a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
   }
@@ -166,6 +168,85 @@ export class FilesystemForgiumRepository {
     return rejected;
   }
 
+
+  async listReview(): Promise<InboxItem[]> {
+    await this.assertInitialized();
+    const items: InboxItem[] = [];
+    for (const entry of (await safeReaddir(this.paths.inboxReview)).filter((e) => e.endsWith(".md")).sort()) {
+      items.push(await this.readInboxFile(path.join(this.paths.inboxReview, entry)));
+    }
+    return items.sort((a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
+  }
+
+  async moveToReview(item: InboxItem, questions: string, definitionKind?: "spec" | "adr"): Promise<InboxItem> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id) throw new InvalidInboxItemError(`Inbox item does not match: ${item.id}`);
+    if (current.status === "needs_review") return current;
+    const reviewDir = this.paths.inboxReview;
+    await fs.mkdir(reviewDir, { recursive: true });
+    const destPath = path.join(reviewDir, path.basename(item.path));
+    if (await exists(destPath)) throw new InvalidInboxItemError(`Review item already exists: ${path.relative(this.root, destPath)}`);
+    const reviewed = { ...current, status: "needs_review" as const, path: destPath, definitionKind: definitionKind ?? current.definitionKind };
+    const timestamp = new Date().toISOString();
+    const template = definitionKind === "spec"
+      ? `\n\n## Context\n\n${current.body ?? current.title}\n\n## Objetivo\n\n_TBD_\n\n## Criterios de aceptación\n\n- _TBD_\n\n## Verificación\n\n- _TBD_\n`
+      : definitionKind === "adr"
+      ? `\n\n## Contexto\n\n${current.body ?? current.title}\n\n## Decisión\n\n_TBD_\n\n## Consecuencias\n\n_TBD_\n`
+      : "";
+    const reviewBlock = `\n\n<!-- stonvik:review -->\n> **Stonevik — needs review** (${timestamp})\n${questions.split("\n").map((l) => `> ${l}`).join("\n")}\n`;
+    await this.writeFileAtomic(destPath, this.renderInbox(reviewed) + template + reviewBlock);
+    await fs.rm(item.path, { force: true });
+    return reviewed;
+  }
+
+  async moveReviewToInbox(item: InboxItem): Promise<InboxItem> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id || current.status !== "needs_review") throw new InvalidInboxItemError(`Inbox item is not in review: ${item.id}`);
+    const destPath = path.join(this.paths.inbox, path.basename(item.path));
+    if (await exists(destPath)) throw new InvalidInboxItemError(`Inbox item already exists: ${path.relative(this.root, destPath)}`);
+    const restored = { ...current, status: "captured" as const, path: destPath };
+    await this.writeFileAtomic(destPath, this.renderInbox(restored));
+    await fs.rm(item.path, { force: true });
+    return restored;
+  }
+
+
+  /**
+   * Extract the inline spec/adr content from an inbox item's body.
+   * The content is everything after the H1 title and before the
+   * "<!-- stonvik:review -->" delimiter. Returns undefined if no
+   * meaningful content exists (only _TBD_ placeholders).
+   */
+  extractInlineSpec(item: InboxItem): string | undefined {
+    if (!item.body) return undefined;
+    const delimiter = item.body.indexOf("<!-- stonvik:review -->");
+    const content = delimiter >= 0 ? item.body.slice(0, delimiter).trim() : item.body.trim();
+    if (!content) return undefined;
+    const stripped = content.replace(/_TBD_/g, "").replace(/- +$/gm, "").trim();
+    if (stripped.length < 20) return undefined;
+    return content;
+  }
+
+  renderSpecDocument(item: InboxItem, inlineSpec: string): string {
+    const source = `inbox: ${item.id}`;
+    const meta = [
+      "---",
+      YAML.stringify({
+        stonvik: {
+          schemaVersion: 1,
+          source: { type: "inbox", ref: item.id },
+          title: item.title,
+          goal: item.classification?.proposed?.goal ?? item.title,
+          acceptance: item.classification?.proposed?.acceptance ?? [],
+          verification: item.classification?.proposed?.verification ?? { commands: [] },
+        },
+      }),
+      "---",
+      "",
+    ].join("\n");
+    return meta + inlineSpec + "\n";
+  }
+
   async requireDefinitionForInbox(id: string, kind: "spec" | "adr", legacyReference = false): Promise<InboxItem> {
     const item = await this.requireInbox(id);
     return this.requireDefinitionForInboxItem(item, kind, legacyReference);
@@ -199,6 +280,36 @@ export class FilesystemForgiumRepository {
   async confirmDefinitionForInbox(id: string): Promise<Feature> {
     const item = await this.requireInbox(id);
     return this.confirmDefinitionForInboxItem(item);
+  }
+
+
+  /**
+   * Promote an inbox item with inline spec content to a ready Work feature.
+   * Creates the definition directory, writes the definition.yaml metadata,
+   * writes the spec/adr document, and then confirms and creates the feature.
+   */
+  async promoteInlineDefinition(item: InboxItem, specContent: string): Promise<Feature> {
+    const current = await this.readInboxFile(item.path);
+    if (current.id !== item.id) throw new InvalidInboxItemError(`Inbox item does not match: ${item.id}`);
+    if (!current.definitionKind) throw new InvalidInboxItemError(`Inbox item has no definition kind: ${item.id}`);
+    const slug = `${slugify(current.title)}-${current.id.slice(-5)}`;
+    const defDir = this.paths.definitionDir(slug);
+    await fs.mkdir(defDir, { recursive: true });
+    const docName = current.definitionKind === "spec" ? "spec.md" : "adr.md";
+    const specPath = path.join(defDir, docName);
+    await this.writeFileAtomic(specPath, specContent);
+    const metadata = {
+      schemaVersion: 1,
+      inboxRef: current.id,
+      kind: current.definitionKind,
+      document: docName,
+    };
+    await this.writeFileAtomic(path.join(defDir, "definition.yaml"), YAML.stringify(metadata));
+    const relSpecPath = path.relative(this.root, specPath);
+    const updated = { ...current, status: "needs_definition" as const, definitionRef: relSpecPath, path: item.path };
+    await this.writeInboxItem(updated);
+    const definition = await this.readDefinitionWorkDefinition(specPath, updated);
+    return this.createFeatureFromInboxItem(updated, definition);
   }
 
   async confirmDefinitionForInboxItem(item: InboxItem): Promise<Feature> {
@@ -373,7 +484,7 @@ export class FilesystemForgiumRepository {
     return receipt;
   }
 
-  async reviewFeature(id: string, decision: ReviewDecision, summary: string, actorName = "forgium", findings?: string[], runId?: string): Promise<Feature> {
+  async reviewFeature(id: string, decision: ReviewDecision, summary: string, actorName = "stonvik", findings?: string[], runId?: string): Promise<Feature> {
     const feature = await this.requireFeature(id);
     if (feature.state !== "review") throw new InvalidStateTransitionError(feature.state, "review");
     await this.persistReceipt(feature, this.createReviewReceipt(feature, decision, summary, actorName, findings, runId));
@@ -386,7 +497,7 @@ export class FilesystemForgiumRepository {
     if (current.state !== "ready" && current.state !== "doing") throw new InvalidStateTransitionError(current.state, "doing");
     const profile = await this.inspectExecutionMode(id);
     const runId = options.runId ?? `run-${timestampForFile()}-${shortId()}`;
-    const request = { root: this.root, feature: current, profile, runId, permissions: "repository" as const, allowedPaths: ["source files and tests; never product/, features/, or .forgium/"], signal };
+    const request = { root: this.root, feature: current, profile, runId, permissions: "repository" as const, allowedPaths: ["source files and tests; never product/, features/, or .stonvik/"], signal };
     const adapter = await registry.resolve(request);
     if (!adapter) return { outcome: "needs_human", feature: current, summary: "No execution adapter is available for this Feature." };
 
@@ -506,7 +617,7 @@ export class FilesystemForgiumRepository {
 
   async getStatus(): Promise<RepositoryStatus> {
     await this.assertInitialized();
-    const inbox: Record<string, number> = { captured: 0, needs_definition: 0, promoted: 0, merged: 0, deferred: 0, rejected: 0 };
+    const inbox: Record<string, number> = { captured: 0, needs_definition: 0, needs_review: 0, promoted: 0, merged: 0, deferred: 0, rejected: 0 };
     for (const item of await this.listInbox()) inbox[item.status] = (inbox[item.status] ?? 0) + 1;
     const features = Object.fromEntries(FEATURE_STATES.map((s) => [s, 0])) as RepositoryStatus["features"];
     for (const feature of await this.listFeatures()) features[feature.state]++;
@@ -519,6 +630,9 @@ export class FilesystemForgiumRepository {
     if (issues.length) return { valid: false, issues };
     for (const file of (await safeReaddir(this.paths.inbox)).filter((e) => e.endsWith(".md"))) {
       try { await this.readInboxFile(path.join(this.paths.inbox, file)); } catch (error) { issues.push({ severity: "error", code: "INVALID_INBOX_ITEM", message: String((error as Error).message), path: path.join(this.paths.inbox, file) }); }
+    }
+    for (const file of (await safeReaddir(this.paths.inboxReview)).filter((e) => e.endsWith(".md"))) {
+      try { await this.readInboxFile(path.join(this.paths.inboxReview, file)); } catch (error) { issues.push({ severity: "error", code: "INVALID_INBOX_ITEM", message: String((error as Error).message), path: path.join(this.paths.inboxReview, file) }); }
     }
     for (const file of (await safeReaddir(this.paths.inboxReceipts)).filter((e) => e.endsWith(".yaml"))) {
       try { ClassificationReceiptSchema.parse(YAML.parse(await fs.readFile(path.join(this.paths.inboxReceipts, file), "utf8"))); }
@@ -665,12 +779,12 @@ export class FilesystemForgiumRepository {
   }
 
   private async assertInitialized(): Promise<void> {
-    for (const dir of this.paths.requiredDirs) if (!(await exists(dir))) throw new ForgiumNotInitializedError();
+    for (const dir of this.paths.requiredDirs) if (!(await exists(dir))) throw new StonvikNotInitializedError();
   }
 
   private createVerificationReceipt(feature: Feature, runId: string, outcome: VerificationReceipt["outcome"], checks: VerificationReceipt["checks"], evidence?: ReceiptEvidence[]): VerificationReceipt {
     return {
-      ...this.receiptBase(feature, "verification", outcome, `Verification outcome: ${outcome}.`, runId, "verifier", "forgium"),
+      ...this.receiptBase(feature, "verification", outcome, `Verification outcome: ${outcome}.`, runId, "verifier", "stonvik"),
       kind: "verification",
       outcome,
       checks,
@@ -701,7 +815,7 @@ export class FilesystemForgiumRepository {
 
   private createHandoffReceipt(feature: Feature, runId: string, outcome: "failed" | "blocked" | "needs_human" | "cancelled", relatedReceipt: string | undefined, reason: string): Receipt {
     return {
-      ...this.receiptBase(feature, "handoff", outcome, reason, runId, "system", "forgium"),
+      ...this.receiptBase(feature, "handoff", outcome, reason, runId, "system", "stonvik"),
       kind: "handoff",
       outcome,
       reason,
@@ -793,7 +907,7 @@ export class FilesystemForgiumRepository {
     return { ...frontmatter, title: titleMatch[1]!.trim(), body: rest || undefined, path: filePath };
   }
 
-  private async writeInboxItem(item: InboxItem): Promise<void> {
+  async writeInboxItem(item: InboxItem): Promise<void> {
     await this.writeFileAtomic(item.path, this.renderInbox(item));
   }
 
@@ -803,12 +917,13 @@ export class FilesystemForgiumRepository {
     if (item.definitionKind) fm.definitionKind = item.definitionKind;
     if (item.featureRef) fm.featureRef = item.featureRef;
     if (item.clarification) fm.clarification = item.clarification;
+    if (item.classification) fm.classification = item.classification;
     return `---\n${YAML.stringify(fm)}---\n\n# ${item.title}\n${item.body ? `\n${item.body}\n` : ""}`;
   }
 
   private renderDefinitionTemplate(item: InboxItem, kind: "spec" | "adr"): string {
     return `---\n${YAML.stringify({
-      forgium: {
+      stonvik: {
         schemaVersion: 1,
         source: { type: "inbox", ref: item.id },
         title: item.title,
@@ -824,8 +939,8 @@ export class FilesystemForgiumRepository {
     const raw = await fs.readFile(definitionPath, "utf8");
     const match = raw.match(/^---\n([\s\S]*?)\n---\n?[\s\S]*$/);
     if (!match) throw new InvalidInboxItemError(`Definition is missing frontmatter: ${item.definitionRef}`);
-    const parsed = YAML.parse(match[1]!) as { forgium?: Partial<CreateFeatureInput> & { schemaVersion?: number; source?: { type?: string; ref?: string } } };
-    const definition = parsed.forgium;
+    const parsed = YAML.parse(match[1]!) as { stonvik?: Partial<CreateFeatureInput> & { schemaVersion?: number; source?: { type?: string; ref?: string } } };
+    const definition = parsed.stonvik;
     if (!definition || definition.schemaVersion !== 1 || definition.source?.type !== "inbox" || definition.source.ref !== item.id) {
       throw new InvalidInboxItemError(`Definition does not reference Inbox item: ${item.id}`);
     }
@@ -854,7 +969,7 @@ export class FilesystemForgiumRepository {
 
   private async ensureGitignoreRuntime(): Promise<void> {
     const gitignore = path.join(this.root, ".gitignore");
-    const line = ".forgium/runtime/";
+    const line = ".stonvik/runtime/";
     const current = await fs.readFile(gitignore, "utf8").catch(() => "");
     if (!current.split(/\r?\n/).includes(line)) await fs.appendFile(gitignore, `${current.endsWith("\n") || current.length === 0 ? "" : "\n"}${line}\n`);
   }

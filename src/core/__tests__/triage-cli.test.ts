@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { FilesystemForgiumRepository } from "../../core/index.js";
+import { FilesystemStonvikRepository } from "../../core/index.js";
 
 async function cli(root: string, ...args: string[]): Promise<{ stdout: string; stderr: string }> {
   const cliPath = path.resolve(process.cwd(), "src/cli/index.ts");
@@ -24,9 +24,9 @@ function run(command: string, args: string[], cwd: string, input = ""): Promise<
   });
 }
 
-describe("forgium triage", () => {
+describe("stonvik triage", () => {
   it("does not approve captured Inbox items in non-interactive mode", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-triage-test-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-triage-test-"));
     await cli(root, "init");
     await cli(root, "capture", "Add dark mode");
 
@@ -37,10 +37,10 @@ describe("forgium triage", () => {
   });
 
   it("records a pending Inbox clarification answer", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-clarification-cli-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-clarification-cli-"));
     await cli(root, "init");
     await cli(root, "capture", "Create a Markdown file");
-    const repo = new FilesystemForgiumRepository(root);
+    const repo = new FilesystemStonvikRepository(root);
     const item = (await repo.listInbox())[0]!;
     await repo.requestInboxClarification(item.id, "output_path");
 
@@ -50,7 +50,7 @@ describe("forgium triage", () => {
   });
 
   it("classifies an Inbox item into a ready implementation Work in one CLI session", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-triage-e2e-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-triage-e2e-"));
     await cli(root, "init");
     await cli(root, "capture", "Add dark mode");
 
@@ -64,7 +64,7 @@ describe("forgium triage", () => {
   });
 
   it("marks an Inbox item needs-definition without creating executable Work", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-triage-spec-e2e-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-triage-spec-e2e-"));
     await cli(root, "init");
     await cli(root, "capture", "Add notifications");
 
@@ -77,7 +77,7 @@ describe("forgium triage", () => {
   });
 
   it("does not write during dry-run", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-triage-dry-run-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-triage-dry-run-"));
     await cli(root, "init");
     await cli(root, "capture", "Add dark mode");
 

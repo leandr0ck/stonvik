@@ -4,6 +4,7 @@ import type { InboxItem } from "../domain/types.js";
 import { parseClassificationPayload, classificationPrompt } from "../services/classification.js";
 import type { AdapterProgressCallback } from "./execution-adapter.js";
 import { reportAgentActivity, startHeartbeat } from "./execution-adapter.js";
+import { buildModelArgs } from "../services/config.js";
 
 type RpcEvent = {
   id?: string;
@@ -27,7 +28,12 @@ export class PiClassificationAdapter {
   private classified = false;
   private requestNumber = 0;
 
-  constructor(private readonly command = process.env.FORGIUM_PI_COMMAND ?? "pi", private readonly timeoutMs = 120_000, private readonly heartbeatIntervalMs = 10_000) {}
+  constructor(
+    private readonly command = process.env.STONVIK_PI_COMMAND ?? "pi",
+    private readonly timeoutMs = 120_000,
+    private readonly heartbeatIntervalMs = 10_000,
+    private readonly model?: string,
+  ) {}
 
   async isAvailable(): Promise<boolean> {
     return new Promise((resolve) => {
@@ -93,7 +99,8 @@ export class PiClassificationAdapter {
 
   private ensureChild(): ChildProcessWithoutNullStreams {
     if (this.child) return this.child;
-    const child = spawn(this.command, ["--mode", "rpc", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files"], { stdio: ["pipe", "pipe", "pipe"] });
+    const modelArgs = buildModelArgs(this.model);
+    const child = spawn(this.command, ["--mode", "rpc", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", ...modelArgs], { stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
     child.stdout.on("data", (chunk: Buffer) => this.read(chunk));
     child.stderr.resume();

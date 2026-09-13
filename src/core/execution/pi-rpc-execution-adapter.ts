@@ -3,13 +3,19 @@ import { StringDecoder } from "node:string_decoder";
 import type { ExecutionProfile } from "../domain/types.js";
 import type { ExecutionAdapter, ExecutionRequest, ExecutionResult } from "./execution-adapter.js";
 import { reportAgentActivity, startHeartbeat } from "./execution-adapter.js";
+import { buildModelArgs } from "../services/config.js";
 
-const RESULT_PATTERN = /FORGIUM_RESULT:\s*(completed|verification_failed|blocked|needs_human|cancelled)/i;
+const RESULT_PATTERN = /STONVIK_RESULT:\s*(completed|verification_failed|blocked|needs_human|cancelled)/i;
 
 export class PiRpcExecutionAdapter implements ExecutionAdapter {
   readonly id = "pi-rpc";
 
-  constructor(private readonly command = process.env.FORGIUM_PI_COMMAND ?? "pi", private readonly timeoutMs = 30 * 60 * 1000, private readonly heartbeatIntervalMs = 10_000) {}
+  constructor(
+    private readonly command = process.env.STONVIK_PI_COMMAND ?? "pi",
+    private readonly timeoutMs = 30 * 60 * 1000,
+    private readonly heartbeatIntervalMs = 10_000,
+    private readonly model?: string,
+  ) {}
 
   supports(profile: ExecutionProfile): boolean { return profile.kind === "direct"; }
 
@@ -22,7 +28,8 @@ export class PiRpcExecutionAdapter implements ExecutionAdapter {
   }
 
   async execute(request: ExecutionRequest): Promise<ExecutionResult> {
-    const child = spawn(this.command, ["--mode", "rpc", "--no-session"], { cwd: request.root, stdio: ["pipe", "pipe", "pipe"] });
+    const modelArgs = buildModelArgs(this.model);
+    const child = spawn(this.command, ["--mode", "rpc", "--no-session", ...modelArgs], { cwd: request.root, stdio: ["pipe", "pipe", "pipe"] });
     const decoder = new StringDecoder("utf8");
     let buffer = "";
     let assistantText = "";
@@ -74,7 +81,7 @@ export class PiRpcExecutionAdapter implements ExecutionAdapter {
         if (!settled) { clearTimeout(timeout); stopHeartbeat(); reject(error); }
       });
       child.once("close", (code) => {
-        if (!settled) finish(code === 0 ? parsePiResult(assistantText) : { outcome: "needs_human", summary: `Pi exited before producing a Forgium result (code ${code ?? "unknown"}).` });
+        if (!settled) finish(code === 0 ? parsePiResult(assistantText) : { outcome: "needs_human", summary: `Pi exited before producing a Stonevik result (code ${code ?? "unknown"}).` });
       });
       request.signal?.addEventListener("abort", abort, { once: true });
       child.stdin.write(`${JSON.stringify({ id: request.runId, type: "prompt", message: buildPiPrompt(request) })}\n`);
@@ -87,7 +94,7 @@ export function buildPiPrompt(request: ExecutionRequest): string {
     ? "Implement the Feature directly."
     : `Follow the repository's spec-driven workflow using ${request.profile.specPath}.`;
   return [
-    "You are the execution engine for Forgium.",
+    "You are the execution engine for Stonevik.",
     `Work only inside repository: ${request.root}`,
     `Feature: ${request.feature.id}`,
     `Title: ${request.feature.manifest.title}`,
@@ -97,16 +104,16 @@ export function buildPiPrompt(request: ExecutionRequest): string {
     `Verification policy:\n${request.feature.manifest.verification.commands.map((command) => `- ${command.name}: ${command.run}`).join("\n") || "- manual evidence required"}`,
     `Allowed paths: ${(request.allowedPaths ?? []).join(", ") || "repository source files only"}`,
     profile,
-    "Do not edit Forgium state directories, manifests, or receipts.",
-    "When finished, print exactly one final line: FORGIUM_RESULT: completed, verification_failed, blocked, needs_human, or cancelled.",
-    "If you cannot establish completion safely, use FORGIUM_RESULT: needs_human."
+    "Do not edit Stonevik state directories, manifests, or receipts.",
+    "When finished, print exactly one final line: STONVIK_RESULT: completed, verification_failed, blocked, needs_human, or cancelled.",
+    "If you cannot establish completion safely, use STONVIK_RESULT: needs_human."
   ].join("\n\n");
 }
 
 export function parsePiResult(text: string): ExecutionResult {
   const matches = [...text.matchAll(new RegExp(RESULT_PATTERN.source, "gi"))];
   const match = matches.at(-1);
-  if (!match) return { outcome: "needs_human", summary: "Pi finished without a recognized Forgium result marker." };
+  if (!match) return { outcome: "needs_human", summary: "Pi finished without a recognized Stonevik result marker." };
   const markerValue = text.slice((match.index ?? 0) + match[0].length).trim();
   try {
     const structured = JSON.parse(markerValue) as Partial<ExecutionResult>;

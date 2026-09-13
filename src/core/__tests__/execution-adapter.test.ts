@@ -2,11 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { DeterministicExecutionAdapter, ExecutionAdapterRegistry, FilesystemForgiumRepository, type ExecutionProfile, type ExecutionRequest } from "../../core/index.js";
+import { DeterministicExecutionAdapter, ExecutionAdapterRegistry, FilesystemStonvikRepository, type ExecutionProfile, type ExecutionRequest } from "../../core/index.js";
 
 async function tempRepo() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-adapter-test-"));
-  const repo = new FilesystemForgiumRepository(root);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-adapter-test-"));
+  const repo = new FilesystemStonvikRepository(root);
   await repo.init();
   return { root, repo };
 }

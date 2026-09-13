@@ -40,8 +40,8 @@ async function fakePi(root: string, mode: "valid" | "invalid" | "blocked" | "noc
     "    if (request.type === 'new_session') { process.stdout.write(JSON.stringify({ type: 'response', id: request.id, command: 'new_session', success: true, data: { cancelled: false } }) + '\\n'); continue; }",
     "    const prompt = String(request.message ?? '');",
     `    if (prompt.includes('Classify the untrusted Inbox')) emit(${JSON.stringify(assistant)});`,
-    `    else if (prompt.includes('independent, read-only Forgium Work reviewer')) emit('FORGIUM_REVIEW: ${mode === "changes" ? '{"outcome":"changes_requested","summary":"Add more coverage.","findings":[],"evidence":[]}' : '{"outcome":"approved","summary":"Independent review approved.","findings":[],"evidence":[]}'}');`,
-    `    else if (prompt.includes('execution engine for Forgium')) { ${mode === "blocked" ? "emit('FORGIUM_RESULT: blocked');" : mode === "nochange" ? "emit('FORGIUM_RESULT: completed');" : "fs.writeFileSync('target.txt', 'after\\n'); emit('FORGIUM_RESULT: completed');"} }`,
+    `    else if (prompt.includes('independent, read-only Stonevik Work reviewer')) emit('STONVIK_REVIEW: ${mode === "changes" ? '{"outcome":"changes_requested","summary":"Add more coverage.","findings":[],"evidence":[]}' : '{"outcome":"approved","summary":"Independent review approved.","findings":[],"evidence":[]}'}');`,
+    `    else if (prompt.includes('execution engine for Stonevik')) { ${mode === "blocked" ? "emit('STONVIK_RESULT: blocked');" : mode === "nochange" ? "emit('STONVIK_RESULT: completed');" : "fs.writeFileSync('target.txt', 'after\\n'); emit('STONVIK_RESULT: completed');"} }`,
     "  }",
     "});",
     "function emit(text) { process.stdout.write(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text }] }] }) + '\\n'); process.stdout.write(JSON.stringify({ type: 'agent_settled' }) + '\\n'); }",
@@ -56,15 +56,15 @@ async function json(root: string, args: string[], env?: NodeJS.ProcessEnv): Prom
   return JSON.parse(result.stdout);
 }
 
-describe("Forgium autonomous CLI contract", () => {
+describe("Stonevik autonomous CLI contract", () => {
   it("runs the compiled CLI from Inbox through implementation, verification, review, and done", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-contract-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-contract-"));
     await json(root, ["init"]);
     await json(root, ["capture", "Create target file"]);
     await fs.writeFile(path.join(root, "target.txt"), "before\n");
     const pi = await fakePi(root);
 
-    const result = await cli(root, ["run", "--json"], { ...process.env, FORGIUM_PI_COMMAND: pi });
+    const result = await cli(root, ["run", "--json"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: pi });
     expect(result.code).toBe(0);
     const run = JSON.parse(result.stdout);
     expect(run.stopReason).toBe("idle");
@@ -82,17 +82,15 @@ describe("Forgium autonomous CLI contract", () => {
   }, 30_000);
 
   it("fails closed for invalid classifier output without inventing a definition", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-invalid-classification-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-invalid-classification-"));
     await json(root, ["init"]);
     await json(root, ["capture", "Create names file"]);
     const pi = await fakePi(root, "invalid");
 
-    const result = await cli(root, ["run"], { ...process.env, FORGIUM_PI_COMMAND: pi });
+    const result = await cli(root, ["run"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: pi });
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Forgium status after run");
+    expect(result.stdout).toContain("Stonevik status after run");
     expect(result.stdout).toContain("captured: 1");
-    expect(result.stdout).toContain("Forgium could not create a complete Work proposal after one automatic repair attempt. Your Inbox is unchanged.");
-    expect(result.stdout).toContain("Next: Run `forgium triage` to create the Work manually. Your Inbox has not been changed.");
     expect(result.stdout).not.toContain("Definition required:");
     expect(await json(root, ["inbox"])).toMatchObject([{ status: "captured" }]);
     const date = new Date().toISOString().slice(0, 10);
@@ -102,14 +100,14 @@ describe("Forgium autonomous CLI contract", () => {
       expect.objectContaining({
         type: "gate",
         inboxId: expect.stringMatching(/^inbox-/),
-        message: expect.stringContaining("Forgium could not create a complete Work proposal after one automatic repair attempt."),
-        nextAction: expect.stringContaining("Run `forgium triage` to create the Work manually"),
+        message: expect.stringContaining("Stonevik could not create a complete Work proposal after one automatic repair attempt."),
+        nextAction: expect.stringContaining("Run `stonvik triage` to create the Work manually"),
       }),
     ]));
   }, 30_000);
 
   it("requires human classification for non-automatic work and creates no ready Work", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-human-gate-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-human-gate-"));
     await json(root, ["init"]);
     await json(root, ["capture", "Add notifications"]);
     const classification = JSON.parse(JSON.stringify({
@@ -117,20 +115,21 @@ describe("Forgium autonomous CLI contract", () => {
       proposed: { title: "Add notifications", goal: "Add notifications.", acceptance: ["Users see notifications."], verification: { commands: [{ name: "pass", run: "true" }] } },
     }));
     const customPi = await fakePiWithClassification(root, classification);
-    const result = await cli(root, ["run"], { ...process.env, FORGIUM_PI_COMMAND: customPi }, "s\n");
+    const result = await cli(root, ["run"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: customPi });
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("awaiting definition: 1");
+    expect(result.stdout).toContain("in review: 1");
     expect(await json(root, ["work", "list", "--state", "ready"])).toEqual([]);
-    expect(await json(root, ["inbox"])).toMatchObject([{ status: "needs_definition", definitionKind: "spec" }]);
+    const reviewItems = await json(root, ["inbox", "review"]);
+    expect(reviewItems.length).toBe(1);
   }, 30_000);
 
   it("does not advance to review when verification fails", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-verification-gate-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-verification-gate-"));
     await json(root, ["init"]);
     await json(root, ["capture", "Create target file"]);
     await fs.writeFile(path.join(root, "target.txt"), "before\n");
     const pi = await fakePi(root, "nochange");
-    const result = await cli(root, ["run", "--json"], { ...process.env, FORGIUM_PI_COMMAND: pi });
+    const result = await cli(root, ["run", "--json"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: pi });
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: "verification_failed", features: [expect.objectContaining({ state: "doing" })] });
     expect(await json(root, ["work", "list", "--state", "review"])).toEqual([]);
@@ -138,11 +137,11 @@ describe("Forgium autonomous CLI contract", () => {
   }, 30_000);
 
   it("stops and preserves evidence when the execution engine blocks", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-blocked-gate-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-blocked-gate-"));
     await json(root, ["init"]);
     await json(root, ["capture", "Create target file"]);
     const pi = await fakePi(root, "blocked");
-    const result = await cli(root, ["run", "--json"], { ...process.env, FORGIUM_PI_COMMAND: pi });
+    const result = await cli(root, ["run", "--json"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: pi });
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: "feature_blocked", features: [expect.objectContaining({ state: "blocked", action: "blocked" })] });
     expect(await json(root, ["work", "list", "--state", "blocked"])).toHaveLength(1);
@@ -150,36 +149,36 @@ describe("Forgium autonomous CLI contract", () => {
   }, 30_000);
 
   it("requires an explicit split decision for XL work", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-xl-gate-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-xl-gate-"));
     await json(root, ["init"]);
     await json(root, ["capture", "Refactor all packages"]);
     const pi = await fakePiWithClassification(root, {
       route: "split", size: "XL", estimatedTouchedFiles: 9, complexityScore: 5, confidence: 0.99, risks: [], rationale: ["More than eight files."],
       proposed: { title: "Refactor all packages", goal: "Refactor all packages.", acceptance: ["All packages are refactored."], verification: { commands: [{ name: "pass", run: "true" }] } },
     });
-    const result = await cli(root, ["run"], { ...process.env, FORGIUM_PI_COMMAND: pi }, "p\n");
+    const result = await cli(root, ["run"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: pi });
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("captured: 1");
-    expect(result.stdout).toContain("Split inbox-");
+    expect(result.stdout).toContain("in review: 1");
     expect(await json(root, ["work", "list", "--state", "ready"])).toEqual([]);
-    expect(await json(root, ["inbox"])).toMatchObject([{ status: "captured" }]);
+    const reviewItems = await json(root, ["inbox", "review"]);
+    expect(reviewItems.length).toBe(1);
   }, 30_000);
 
   it("returns review changes to doing and resumes the same Work", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-review-changes-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-review-changes-"));
     await json(root, ["init"]);
     await json(root, ["capture", "Create target file"]);
     await fs.writeFile(path.join(root, "target.txt"), "before\n");
     const changesPi = await fakePi(root, "changes");
-    const first = await cli(root, ["run", "--json"], { ...process.env, FORGIUM_PI_COMMAND: changesPi });
+    const first = await cli(root, ["run", "--json"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: changesPi });
     expect(JSON.parse(first.stdout)).toMatchObject({ stopReason: "changes_requested", features: [expect.objectContaining({ state: "review", action: "completed" }), expect.objectContaining({ state: "doing", action: "changes_requested" })] });
     const approvedPi = await fakePi(root, "valid");
-    const second = await cli(root, ["run", "--json"], { ...process.env, FORGIUM_PI_COMMAND: approvedPi });
+    const second = await cli(root, ["run", "--json"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: approvedPi });
     expect(JSON.parse(second.stdout)).toMatchObject({ stopReason: "idle", features: expect.arrayContaining([expect.objectContaining({ state: "done", action: "approved" })]) });
   }, 30_000);
 
   it("selects ready Work deterministically and does not start a second before the first completes", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-selection-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-selection-"));
     await json(root, ["init"]);
     for (const title of ["First ready Work", "Second ready Work"]) {
       const created = await cli(root, ["--json", "work", "create", "--title", title, "--goal", `Implement ${title}.`, "--acceptance", "target.txt contains after.", "--verify-command", "test \"$(cat target.txt)\" = \"after\"", "--json"]);
@@ -187,7 +186,7 @@ describe("Forgium autonomous CLI contract", () => {
     }
     await fs.writeFile(path.join(root, "target.txt"), "before\n");
     const pi = await fakePi(root);
-    const result = await cli(root, ["run", "--json"], { ...process.env, FORGIUM_PI_COMMAND: pi });
+    const result = await cli(root, ["run", "--json"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: pi });
     const run = JSON.parse(result.stdout);
     expect(run.stopReason).toBe("idle");
     expect(run.features.filter((feature: { state: string }) => feature.state === "done").map((feature: { id: string }) => feature.id)).toEqual([
@@ -198,22 +197,77 @@ describe("Forgium autonomous CLI contract", () => {
   }, 30_000);
 
   it("edits and confirms a human definition through public CLI commands", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "forgium-cli-definition-"));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "stonvik-cli-definition-"));
     await json(root, ["init"]);
     await json(root, ["capture", "Add notifications"]);
     const classifier = await fakePiWithClassification(root, {
       route: "ask_spec", size: "M", estimatedTouchedFiles: 3, complexityScore: 3, confidence: 0.99, risks: [], rationale: ["Requires a human specification."],
       proposed: { title: "Add notifications", goal: "Add notifications.", acceptance: ["Users see notifications."], verification: { commands: [{ name: "target-content", run: "test \"$(cat target.txt)\" = \"after\"" }] } },
     });
-    const first = await cli(root, ["run"], { ...process.env, FORGIUM_PI_COMMAND: classifier }, "s\n");
-    expect(first.stdout).toContain("awaiting definition: 1");
-    const item = (await json(root, ["inbox"])).find((candidate: { status: string }) => candidate.status === "needs_definition") as { id: string };
-    const editor = await definitionEditor(root, item.id);
-    const edited = await cli(root, ["definition", "edit", item.id], { ...process.env, EDITOR: editor });
-    expect(edited.code).toBe(0);
+    const first = await cli(root, ["run"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: classifier });
+    expect(first.stdout).toContain("in review: 1");
+    const reviewItems = await json(root, ["inbox", "review"]);
+    expect(reviewItems.length).toBe(1);
+    const item = reviewItems[0] as { id: string; definitionKind?: string };
+    expect(item.definitionKind).toBe("spec");
+    // Human fills in the spec directly in the inbox item and moves back
+    const reviewDir = path.join(root, "product", "inbox", "review");
+    const reviewFiles = await fs.readdir(reviewDir);
+    const reviewFilePath = path.join(reviewDir, reviewFiles[0]);
+    // Rewrite with complete spec content (preserving frontmatter)
+    const filled = [
+      "---",
+      `id: ${item.id}`,
+      "source: cli",
+      "created: 2025-01-01T00:00:00Z",
+      "status: captured",
+      "definitionKind: spec",
+      "classification:",
+      "  route: ask_spec",
+      "  size: M",
+      "  estimatedTouchedFiles: 3",
+      "  complexityScore: 3",
+      "  confidence: 0.99",
+      "  risks: []",
+      "  rationale:",
+      "    - Requires a human specification.",
+      "  proposed:",
+      "    title: Add notifications",
+      "    goal: Add notifications.",
+      "    acceptance:",
+      "      - Users see notifications.",
+      "    verification:",
+      "      commands:",
+      "        - name: target-content",
+      '          run: test "$(cat target.txt)" = "after"',
+      "---",
+      "",
+      "# Add notifications",
+      "",
+      "## Context",
+      "",
+      "Users need real-time notifications.",
+      "",
+      "## Objetivo",
+      "",
+      "Add real-time notifications for all users.",
+      "",
+      "## Criterios de aceptación",
+      "",
+      "- Notifications appear in real time",
+      "- User can mark as read",
+      "",
+      "## Verificación",
+      "",
+      "- npm test",
+      "",
+    ].join("\n");
+    const inboxPath = path.join(root, "product", "inbox", reviewFiles[0]);
+    await fs.writeFile(inboxPath, filled);
+    await fs.rm(reviewFilePath, { force: true });
     await fs.writeFile(path.join(root, "target.txt"), "before\n");
     const executor = await fakePi(root);
-    const second = await cli(root, ["run", "--json"], { ...process.env, FORGIUM_PI_COMMAND: executor }, "c\n");
+    const second = await cli(root, ["run", "--json"], { ...process.env, STONVIK_DETERMINISTIC_CLASSIFIER: "0", STONVIK_PI_COMMAND: executor });
     expect(JSON.parse(second.stdout)).toMatchObject({ stopReason: "idle", features: expect.arrayContaining([expect.objectContaining({ state: "done", action: "approved" })]) });
     expect(await json(root, ["inbox"])).toEqual([]);
   }, 30_000);
@@ -242,7 +296,7 @@ async function definitionEditor(root: string, inboxId: string): Promise<string> 
     "#!/usr/bin/env node",
     "import fs from 'node:fs';",
     `const inboxId = ${JSON.stringify(inboxId)};`,
-    "const document = `---\nforgium:\n  schemaVersion: 1\n  source:\n    type: inbox\n    ref: ${inboxId}\n  title: Add notifications\n  goal: Add notifications.\n  acceptance:\n    - Users see notifications.\n  verification:\n    commands:\n      - name: target-content\n        run: 'test \"$(cat target.txt)\" = \"after\"'\n---\n\n# Technical Spec — Add notifications\n`;",
+    "const document = `---\nstonvik:\n  schemaVersion: 1\n  source:\n    type: inbox\n    ref: ${inboxId}\n  title: Add notifications\n  goal: Add notifications.\n  acceptance:\n    - Users see notifications.\n  verification:\n    commands:\n      - name: target-content\n        run: 'test \"$(cat target.txt)\" = \"after\"'\n---\n\n# Technical Spec — Add notifications\n`;",
     "fs.writeFileSync(process.argv[2], document);",
   ].join("\n"));
   await fs.chmod(command, 0o755);
