@@ -1,6 +1,6 @@
 ---
 name: stonvik-workflow
-description: Use when working in a repository initialized with Stonvik, when selecting or implementing a Work item, preparing a handoff, reporting external execution, or coordinating verification and review through the Stonvik CLI. Do not use for unrelated repositories or for changing Stonvik itself.
+description: Use when an agent works in a Stonvik repository or a user asks it to capture/capturar intent, prepare/preparar Work, select or implement a Work item, create a handoff, report external execution, or coordinate verification and review through the Stonvik CLI. Do not use for unrelated repositories or for changing Stonvik itself.
 ---
 
 # Stonvik workflow

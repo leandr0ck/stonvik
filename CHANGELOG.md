@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.2] - 2026-09-13
+
+### Fixed
+
+- The Agent Skill now triggers explicitly for capture and prepare requests, including Spanish forms such as `captura` and `prepara`.
+
 ## [1.1.1] - 2026-09-13
 
 ### Fixed
