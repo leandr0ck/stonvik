@@ -2,13 +2,25 @@
 
 Un agente externo no necesita un adapter privilegiado ni acceso a APIs internas. Puede participar usando la misma CLI que un humano o CI.
 
+Los nombres de comandos son exactos y permanecen en inglés (`capture`, `prepare`, `work start`, etc.). El agente debe usar el binario instalado en el repositorio (`stonvik` o `./node_modules/.bin/stonvik`). No debe ejecutar directamente `dist/cli/index.js` ni modificar sus permisos. Si se ejecuta desde un checkout de Stonvik, usar `node dist/cli/index.js`.
+
+La intención del usuario debe capturarse literalmente. Por ejemplo, “más gráficos visuales” no debe convertirse en “gráficos de torta” sin confirmación; cuando falta alcance, usar `spec-first`.
+
 ## Protocolo
+
+Si el agente también captura la intención, conserva el texto del usuario sin reinterpretarlo:
+
+```bash
+stonvik --root . capture "<texto literal del usuario>" --source agent:pi
+```
 
 1. Seleccionar el Work:
 
    ```bash
    stonvik --root . --json next
    ```
+
+   Si Stonvik fue instalado como dependencia local, `./node_modules/.bin/stonvik` es equivalente.
 
 2. Reclamarlo con una identidad declarada:
 

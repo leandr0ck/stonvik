@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1] - 2026-09-13
+
+### Fixed
+
+- The CLI suggests the canonical English command when an unknown translated command such as `capturar` is entered.
+- The Agent Skill now requires the installed local binary, preserves user intent literally, and avoids modifying generated `dist` files.
+- Public agent integration guidance now documents the same invocation and intent-preservation rules.
+
 ## [1.1.0] - 2026-09-13
 
 ### Added

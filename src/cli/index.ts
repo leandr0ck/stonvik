@@ -16,7 +16,8 @@ program
   .description("Repository-native workflow engine for software development agents")
   .version("1.0.0")
   .option("--root <path>", "repository root override")
-  .option("--json", "emit JSON output");
+  .option("--json", "emit JSON output")
+  .showSuggestionAfterError();
 
 program.command("init")
   .description("Initialize Stonevik structures in the repository")

@@ -7,29 +7,35 @@ description: Use when working in a repository initialized with Stonvik, when sel
 
 Use Stonvik as the source of truth for work state. Conversation context is not durable state: query the repository and read the current handoff before acting.
 
+CLI command names are exact and intentionally remain in English: use `capture`, not a translated variant such as `capturar`; use `prepare`, not `preparar`. If a command fails, read the error and correct the command instead of improvising filesystem operations.
+
 ## Core rule
 
-Participate through the `stonvik` CLI. Do not edit Stonvik state files to advance a workflow. The CLI owns claims, transitions, receipts, verification, and review gates.
+Participate through the `stonvik` CLI. Prefer the installed package binary (`stonvik` or `./node_modules/.bin/stonvik`). Do not invoke a source checkout's `dist/cli/index.js` directly; if that is unavoidable, invoke it through Node rather than changing permissions on generated files. Do not use `npx stonvik` or `bunx stonvik` when the package is not published to the registry; use the local binary or the explicitly installed tarball.
+
+Do not edit Stonvik state files to advance a workflow. The CLI owns claims, transitions, receipts, verification, and review gates.
 
 Do not assume a Work is available because someone mentioned it in a prompt. Select it with `stonvik next --json` or use the explicit Work ID supplied by the repository.
 
 ## Before editing
 
-1. Confirm the repository root. Pass `--root <path>` when the current directory is not the repository root.
+1. Confirm the repository root. Run commands from the target repository, not from the repository that contains the Stonvik source. Pass `--root <path>` when the current directory is not the repository root.
 2. Identify your declared actor identity and role. Use the exact `type:name` value consistently; identity is provenance, not authentication.
-3. For selected Work, claim it before editing:
+3. Preserve the user's intent literally. Do not turn a broad request such as “more visual charts” into a specific solution such as “pie charts” unless the user said so. If scope is unclear, capture the original wording and choose `spec-first` or ask for clarification.
+4. When an agent captures intent, identify the producer accurately, for example `--source agent:pi`; do not invent a more specific product requirement while capturing.
+5. For selected Work, claim it before editing:
 
    ```bash
    stonvik work start <work-id> --actor <type:name> --run-id <run-id>
    ```
 
-4. Read the neutral handoff:
+6. Read the neutral handoff:
 
    ```bash
    stonvik handoff <work-id> --format json
    ```
 
-5. Follow the goal, acceptance criteria, constraints, allowed paths, and verification policy in the handoff. Do not invent missing requirements from conversation context.
+7. Follow the goal, acceptance criteria, constraints, allowed paths, and verification policy in the handoff. Do not invent missing requirements from conversation context.
 
 If `work start` reports a claim conflict, stop. Inspect `stonvik work claim <work-id>`; never delete or overwrite the claim. Use `work recover` only after confirming that the previous process is gone.
 
@@ -69,7 +75,7 @@ Use outcomes honestly:
 - `needs_human`: a human decision or missing information is required;
 - `cancelled`: execution stopped before completion.
 
-Only list artifacts that exist and use repository-relative paths. Do not put secrets in `summary` or `details`.
+Only list artifacts that exist and use repository-relative paths. Local evidence references follow the same rule; external URLs are allowed only when they are evidence, not artifacts. Do not put secrets in `summary` or `details`.
 
 ## Verification and review
 
@@ -109,6 +115,6 @@ Run recovery only after the old process is no longer live. Preserve existing rec
 - The Work was claimed before editing.
 - Only product files required by the handoff were changed.
 - The external report uses `schemaVersion: 1` and the correct actor.
-- Artifacts and evidence references are valid repository paths.
+- Artifacts and local evidence references are valid repository paths.
 - Verification was run when required.
 - An independent actor owns the review.
