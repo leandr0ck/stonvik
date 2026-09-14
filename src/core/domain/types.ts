@@ -4,6 +4,13 @@ export const FEATURE_STATES: FeatureState[] = ["ready", "doing", "review", "bloc
 
 export type InboxStatus = "captured" | "needs_clarification" | "needs_definition" | "needs_review" | "promoted" | "merged" | "deferred" | "rejected";
 export type ClarificationField = "output_path" | "verification" | "scope";
+export type DefinitionKind = "spec" | "adr";
+
+/** A user-owned definition document associated with a Work. */
+export interface DefinitionRef {
+  kind: DefinitionKind;
+  path: string;
+}
 
 export interface InboxClarification {
   field: ClarificationField;
@@ -23,7 +30,7 @@ export interface ActorRef {
 export interface RoutingDecision {
   schemaVersion: 1;
   inboxId: string;
-  route: "direct" | "spec-first";
+  route: "direct" | "spec" | "adr";
   signals: {
     size?: WorkSize;
     estimatedTouchedFiles?: number;
@@ -44,15 +51,11 @@ export interface InboxItem {
   body?: string;
   path: string;
   clarification?: InboxClarification;
-  definitionRef?: string;
-  definitionKind?: "spec" | "adr";
   featureRef?: string;
   classification?: Classification;
   routingDecision?: RoutingDecision;
 }
 
-export type WorkKind = "implementation" | "specification";
-export type PreparationRoute = "direct" | "spec-first";
 export type WorkSize = "XS" | "S" | "M" | "L" | "XL";
 export type ClassificationRoute = "auto_direct" | "ask_direct" | "ask_spec" | "ask_adr" | "split";
 export type ClassificationRisk = "public_api" | "persistence" | "security" | "external_integration" | "multi_package" | "unknown_impact";
@@ -77,8 +80,6 @@ export interface Classification {
 export interface FeatureManifest {
   schemaVersion: 1;
   id: string;
-  /** Optional when reading legacy manifests; new manifests always persist it. */
-  kind: WorkKind;
   title: string;
   created: string;
   source?: { type: string; ref: string };
@@ -88,10 +89,8 @@ export interface FeatureManifest {
   verification: VerificationPolicy;
   classification?: Classification;
   routingDecision?: RoutingDecision;
-  /** Stable Work ID or repository reference for the approved specification. */
-  specificationRef?: string;
+  definitions?: DefinitionRef[];
   routingDecisionRef?: string;
-  deliverables?: string[];
 }
 
 export interface VerificationCommand {
@@ -116,13 +115,12 @@ export interface WorkHandoff {
   generated: string;
   work: {
     id: string;
-    kind: WorkKind;
     title: string;
     goal: string;
     acceptance: string[];
     constraints: string[];
     source?: { type: string; ref: string };
-    specificationRef?: string;
+    definitions?: DefinitionRef[];
   };
   execution: {
     allowedPaths?: string[];
@@ -131,6 +129,7 @@ export interface WorkHandoff {
   protocol: {
     reportCommand: string;
     requestReviewCommand: string;
+    shipCommand: string;
   };
 }
 
@@ -234,10 +233,7 @@ export interface ExecutionReceipt extends ReceiptBase {
 export type Receipt = VerificationReceipt | ReviewReceipt | HandoffReceipt | ExecutionReceipt;
 
 export interface FeatureArtifacts {
-  spec?: string;
-  ticketsDirectory?: string;
   notes?: string;
-  research?: string;
   receiptsDirectory?: string;
 }
 
@@ -250,10 +246,9 @@ export interface Feature {
   artifacts: FeatureArtifacts;
 }
 
-export type ExecutionProfile =
-  | { kind: "direct" }
-  | { kind: "spec-flow"; specPath: string; ticketsPath: string; commands: { implement: string; next: string } }
-  | { kind: "spec-needs-plan"; specPath: string; commands: { init: string; implement: string; next: string } };
+export interface ExecutionProfile {
+  kind: "direct";
+}
 
 export interface RepositoryStatus {
   inbox: Record<string, number>;
@@ -276,7 +271,6 @@ export interface CaptureInput { text: string; source?: string }
 export interface CreateFeatureInput {
   id?: string;
   slug?: string;
-  kind?: WorkKind;
   title: string;
   goal: string;
   acceptance: string[];
@@ -286,10 +280,7 @@ export interface CreateFeatureInput {
   source?: { type: string; ref: string };
   routingDecision?: RoutingDecision;
   routingDecisionRef?: string;
-  specificationRef?: string;
-  deliverables?: string[];
-  /** Used by the spec-first preparation path to stage the document atomically. */
-  specDocument?: string;
+  definitions?: DefinitionRef[];
 }
 
 export interface WorkReviewFinding {

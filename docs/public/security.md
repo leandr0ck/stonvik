@@ -19,13 +19,13 @@ Los actores externos no deben modificar directamente:
 
 - `product/inbox/` para avanzar intención;
 - `features/ready`, `doing`, `review`, `blocked` o `done` para cambiar estado;
-- manifests, receipts, claims, leases o event streams.
+- manifests, receipts, claims o event streams.
 
 Usar siempre la CLI. Las transiciones mueven el directorio completo del Work y los receipts se escriben de forma append-only.
 
 ## Paths de reportes
 
-Los artifacts externos se validan como paths existentes dentro del repositorio. Se rechazan rutas absolutas y segmentos `..`. Los reportes se leen desde paths relativos al repositorio mediante la CLI.
+Los artifacts externos se validan como paths existentes dentro del repositorio y no simbólicos. Se rechazan rutas absolutas y segmentos `..`. Los reportes se leen desde paths relativos al repositorio mediante la CLI.
 
 Esta validación evita que un reporte convierta un path arbitrario en evidencia durable o en una referencia de otro árbol de archivos.
 

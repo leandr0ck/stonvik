@@ -12,41 +12,41 @@ npx stonvik init
 npx stonvik --help
 ```
 
-Si el paquete está instalado globalmente, se puede usar `stonvik` en lugar de `npx stonvik`.
-
-## Flujo mínimo
+## Flujo
 
 ```text
-capture → prepare → ready → start → doing → report
-→ verify → review → done
+capture → triage → define → ready
+ready → start → doing → report → verify → review → ship → done
 ```
 
-Un reporte `completed` no cierra el Work. La verificación determinista y el review independiente son gates separados.
+- **Capture:** guarda la intención cruda en Inbox.
+- **Triage:** registra si el trabajo sigue una ruta directa, necesita una spec o necesita un ADR.
+- **Define:** crea el Work ejecutable con título, objetivo, aceptación y verificación.
+- **Implement:** un actor externo decide y ejecuta su propio proceso; Stonvik solo registra el reporte.
+- **Verify:** ejecuta los checks declarados en el manifest.
+- **Review:** un actor distinto registra una decisión independiente.
+- **Ship:** convierte un Work aprobado en `done`.
+
+Triage no ejecuta nada y una spec o ADR no tiene formato impuesto por Stonvik. Son documentos del usuario: Stonvik solo registra sus rutas, comprueba que existan y evita que apunten al estado interno del workflow.
 
 ## Guías
 
-- [Quickstart](./quickstart.md): primer Work directo y ruta spec-first.
+- [Quickstart](./quickstart.md): ciclo completo con un Work.
 - [Referencia de CLI](./cli-reference.md): comandos, opciones, salidas y errores.
-- [Contratos](./contracts.md): formatos de actores, handoffs, reportes y configuración.
+- [Contratos](./contracts.md): manifests, actores, referencias y reportes.
 - [Integración de agentes](./agent-integration.md): protocolo para cualquier agente externo.
 - [CI](./ci.md): uso desde pipelines y procesos automatizados.
 - [Seguridad y confianza](./security.md): claims, paths, identidad y límites.
-- [Migración](./migration.md): transición desde `run`, `triage` e `implement`.
 
 ## Qué se versiona
 
-Se versionan los directorios `product/` y `features/`, incluidos manifests, especificaciones, notas y receipts. `.stonvik/runtime/` contiene claims, leases y otros datos efímeros; Stonvik lo agrega al `.gitignore` durante `init`.
+Se versionan `product/` y `features/`, incluidos manifests, documentos de usuario, notas, provenance y receipts. `.stonvik/runtime/` contiene claims efímeros y se agrega al `.gitignore` durante `init`.
 
-## Participantes
+## Principios
 
-- **Humanos:** capturan intención, deciden routing y hacen review.
-- **Agentes:** consumen handoffs, modifican archivos de trabajo y reportan resultados.
-- **CI/procesos:** ejecutan verificaciones o importan evidencia con el mismo contrato.
-
-Ningún actor necesita conocer Pi, Spec Flow u otro runtime para usar el workflow neutral.
-
-## Compatibilidad
-
-`run`, `triage` e `implement --engine pi-spec-flow` permanecen como rutas de compatibilidad durante la migración. Para nuevas integraciones, usar `prepare`, `next`, `handoff`, `work start`, `work report`, `verify` y `work review`.
-
-La identidad de un actor (`--actor` o `STONVIK_ACTOR`) es procedencia declarada, no autenticación.
+- La intención no es ejecución: solo un Work definido puede seleccionarse.
+- El manifest es el contrato ejecutable; los documentos asociados siguen siendo libres.
+- Las transiciones mueven el directorio completo del Work.
+- Un implementador nunca puede aprobar su propio trabajo.
+- La identidad declarada (`--actor` o `STONVIK_ACTOR`) es procedencia, no autenticación.
+- Ningún actor necesita conocer Pi, Spec Flow u otro runtime para participar.

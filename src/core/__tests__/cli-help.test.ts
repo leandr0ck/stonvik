@@ -3,28 +3,28 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 const execFile = promisify(execFileCallback);
+const cliPath = `${process.cwd()}/src/cli/index.ts`;
+const tsx = `${process.cwd()}/node_modules/tsx/dist/cli.mjs`;
 
 describe("CLI command surface", () => {
-  it("exposes the phase workflow commands", async () => {
-    const cliPath = `${process.cwd()}/src/cli/index.ts`;
-    const tsx = `${process.cwd()}/node_modules/tsx/dist/cli.mjs`;
+  it("exposes the five workflow phases without implementation-specific commands", async () => {
     const { stdout } = await execFile(process.execPath, [tsx, cliPath, "--help"], { cwd: process.cwd() });
 
+    expect(stdout).toContain("capture");
     expect(stdout).toContain("triage");
-    expect(stdout).toContain("run");
+    expect(stdout).toContain("define");
+    expect(stdout).toContain("verify");
+    expect(stdout).toContain("ship");
     expect(stdout).toContain("work");
-    expect(stdout).toContain("implement");
-    expect(stdout).toContain("definition");
-
-    const { stdout: runHelp } = await execFile(process.execPath, [tsx, cliPath, "run", "--help"], { cwd: process.cwd() });
-    expect(runHelp).not.toContain("--engine");
+    expect(stdout).not.toContain("run");
+    expect(stdout).not.toContain("implement");
   });
 
-  it("exposes Work creation", async () => {
-    const cliPath = `${process.cwd()}/src/cli/index.ts`;
-    const tsx = `${process.cwd()}/node_modules/tsx/dist/cli.mjs`;
-    const { stdout } = await execFile(process.execPath, [tsx, cliPath, "work", "create", "--help"], { cwd: process.cwd() });
+  it("exposes user-owned spec and ADR references during definition", async () => {
+    const { stdout } = await execFile(process.execPath, [tsx, cliPath, "define", "--help"], { cwd: process.cwd() });
 
+    expect(stdout).toContain("--spec");
+    expect(stdout).toContain("--adr");
     expect(stdout).toContain("--verify-command");
   });
 });

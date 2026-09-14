@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { PiClassificationAdapter } from "../../core/index.js";
+import { PiClassificationAdapter } from "../../integrations/pi/pi-classification-adapter.js";
 
 describe("PiClassificationAdapter", () => {
   it("reuses one ephemeral RPC process and resets it between Inbox items", async () => {

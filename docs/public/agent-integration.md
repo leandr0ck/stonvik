@@ -1,28 +1,18 @@
 # Integración de agentes
 
-Un agente externo no necesita un adapter privilegiado ni acceso a APIs internas. Puede participar usando la misma CLI que un humano o CI.
+Un agente externo participa con la misma CLI que un humano o CI. Stonvik no decide qué modelo, skill, framework o proceso editorial debe usar el agente.
 
-Los nombres de comandos son exactos y permanecen en inglés (`capture`, `prepare`, `work start`, etc.). El agente debe usar el binario instalado en el repositorio (`stonvik` o `./node_modules/.bin/stonvik`). No debe ejecutar directamente `dist/cli/index.js` ni modificar sus permisos. Si se ejecuta desde un checkout de Stonvik, usar `node dist/cli/index.js`.
-
-La intención del usuario debe capturarse literalmente. Por ejemplo, “más gráficos visuales” no debe convertirse en “gráficos de torta” sin confirmación; cuando falta alcance, usar `spec-first`.
+Los comandos son exactos y permanecen en inglés (`capture`, `triage`, `define`, `work start`, etc.). Use el binario instalado en el repositorio (`stonvik` o `./node_modules/.bin/stonvik`).
 
 ## Protocolo
 
-Si el agente también captura la intención, conserva el texto del usuario sin reinterpretarlo:
-
-```bash
-stonvik --root . capture "<texto literal del usuario>" --source agent:pi
-```
-
-1. Seleccionar el Work:
+1. Seleccionar Work definido:
 
    ```bash
    stonvik --root . --json next
    ```
 
-   Si Stonvik fue instalado como dependencia local, `./node_modules/.bin/stonvik` es equivalente.
-
-2. Reclamarlo con una identidad declarada:
+2. Reclamarlo:
 
    ```bash
    stonvik --root . work start <work-id> \
@@ -30,59 +20,38 @@ stonvik --root . capture "<texto literal del usuario>" --source agent:pi
      --run-id agent-codex-001
    ```
 
-3. Leer el contexto neutral:
+3. Leer el contrato neutral:
 
    ```bash
-   stonvik --root . handoff <work-id> --format json > handoff.json
+   stonvik --root . work handoff <work-id> --format json > handoff.json
    ```
 
-4. Modificar los archivos de producto necesarios. El agente no debe modificar manifests, receipts, claims, leases, `product/` ni `features/` para cambiar el workflow.
+4. Leer las referencias `definitions` si el Work tiene spec o ADR. Esos archivos pertenecen al equipo y su formato es libre.
 
-5. Escribir un `ExternalExecutionReport` y entregarlo mediante:
+5. Implementar con el proceso propio del agente. No modificar manifests, receipts, claims, `product/` ni `features/` para cambiar el workflow.
+
+6. Crear un reporte JSON y registrarlo:
 
    ```bash
    stonvik --root . work report <work-id> --receipt result.json
    ```
 
-6. Ejecutar o solicitar verificación:
+7. Verificar y solicitar review a otro actor:
 
    ```bash
    stonvik --root . verify <work-id>
+   stonvik --root . work review <work-id> \
+     --actor human:reviewer \
+     --decision approved \
+     --summary "Revisado contra el manifest."
+   stonvik --root . ship <work-id>
    ```
 
-7. Dejar el review a un actor diferente. Un implementador nunca debe aprobar su propia ejecución.
+Un review aprobado no es todavía `done`; `ship` es el gate final. Un implementador nunca aprueba su propia ejecución.
 
-## Resultados honestos
+## Reportes honestos
 
-Usar `completed` solo cuando el actor terminó su trabajo y puede describirlo. Usar:
-
-- `blocked` cuando una dependencia impide continuar;
-- `needs_human` cuando hace falta una decisión o información humana;
-- `cancelled` cuando la ejecución se detuvo antes de terminar.
-
-No convertir un error de herramienta o una salida ambigua en `completed` para avanzar el pipeline.
-
-## Recuperación
-
-Si el agente desaparece, el siguiente actor debe inspeccionar primero:
-
-```bash
-stonvik --root . work claim <work-id>
-```
-
-Solo debe ejecutar `work recover` después de confirmar que el proceso reclamante ya no existe. No borrar ni reescribir claims manualmente.
-
-## Uso de la Skill
-
-El paquete incluye `skills/stonvik-workflow/SKILL.md`. Es una capa de instrucciones para agentes que sepan cargar Agent Skills. La Skill enseña el protocolo, pero no reemplaza la CLI ni los schemas.
-
-Instalarla en el directorio de skills que utilice el runtime del cliente y mantener la misma versión que el paquete de Stonvik. En entornos que versionan skills dentro del repositorio, se puede copiar como una skill local; en entornos globales, instalarla en el catálogo de skills del agente.
-
-La Skill no contiene configuración de Pi, nombres de modelos ni lógica de persistencia.
-
-## Contrato de salida
-
-El agente debe producir al menos:
+El reporte mínimo es:
 
 ```json
 {
@@ -93,4 +62,18 @@ El agente debe producir al menos:
 }
 ```
 
-Añadir `artifacts` solo para paths que existan en el repositorio. Añadir `evidence` cuando exista una evidencia concreta que Stonvik o CI pueda localizar.
+`outcome` también puede ser `blocked`, `needs_human` o `cancelled`. Añada `artifacts` solo para paths existentes y `evidence` para evidencia localizable o URLs. `completed` no equivale a verificación ni aprobación.
+
+## Recuperación
+
+Si el agente desaparece, inspeccione primero el claim:
+
+```bash
+stonvik --root . work claim <work-id>
+```
+
+Use `work recover` solo después de confirmar que el proceso anterior ya no existe. No borre claims manualmente.
+
+## Límites de confianza
+
+`--actor` y `STONVIK_ACTOR` registran procedencia declarada; no son autenticación. Los gates se basan en contratos, receipts y transiciones persistidas en el repositorio.

@@ -4,7 +4,7 @@ import { ActorRefSchema } from "./actor.schema.js";
 export const RoutingDecisionSchema = z.object({
   schemaVersion: z.literal(1),
   inboxId: z.string().min(1),
-  route: z.enum(["direct", "spec-first"]),
+  route: z.enum(["direct", "spec", "adr"]),
   signals: z.object({
     size: z.enum(["XS", "S", "M", "L", "XL"]).optional(),
     estimatedTouchedFiles: z.number().int().nonnegative().optional(),

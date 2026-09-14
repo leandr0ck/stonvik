@@ -23,7 +23,5 @@ export class RoutingPolicyViolationError extends StonvikError { constructor(mess
 export class ActorInvalidError extends StonvikError { constructor(message: string) { super(message, "ACTOR_INVALID", 2); } }
 export class WorkReportInvalidError extends StonvikError { constructor(message: string) { super(message, "WORK_REPORT_INVALID", 2); } }
 export class WorkClaimConflictError extends StonvikError { constructor(message: string) { super(message, "WORK_CLAIM_CONFLICT", 3); } }
-export class SpecificationInvalidError extends StonvikError { constructor(message: string) { super(message, "SPECIFICATION_INVALID", 2); } }
-export class SpecificationNotApprovedError extends StonvikError { constructor(id: string) { super(`Approved specification Work required: ${id}`, "SPECIFICATION_NOT_APPROVED", 2); } }
 export class ReviewActorInvalidError extends StonvikError { constructor(message: string) { super(message, "REVIEW_ACTOR_INVALID", 2); } }
 export class ReviewSelfApprovalError extends StonvikError { constructor(message: string) { super(message, "REVIEW_SELF_APPROVAL", 2); } }

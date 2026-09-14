@@ -25,7 +25,7 @@ RUN_ID="ci-${CI_PIPELINE_ID:-local}"
 stonvik work start "$WORK_ID" \
   --actor ci:github \
   --run-id "$RUN_ID"
-stonvik handoff "$WORK_ID" --format json > handoff.json
+stonvik work handoff "$WORK_ID" --format json > handoff.json
 
 # El pipeline ejecuta aquí los comandos de build/test del proyecto.
 # Al terminar, escribe result.json con ExternalExecutionReport.

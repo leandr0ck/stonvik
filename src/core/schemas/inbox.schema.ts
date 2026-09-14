@@ -11,8 +11,6 @@ export const InboxFrontmatterSchema = z.object({
     field: z.enum(["output_path", "verification", "scope"]),
     answer: z.string().min(1).optional(),
   }).strict().optional(),
-  definitionRef: z.string().optional(),
-  definitionKind: z.enum(["spec", "adr"]).optional(),
   featureRef: z.string().optional(),
   classification: ClassificationSchema.optional(),
   routingDecision: RoutingDecisionSchema.optional(),

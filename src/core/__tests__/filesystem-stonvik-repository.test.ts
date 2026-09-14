@@ -64,15 +64,23 @@ describe("FilesystemStonvikRepository", () => {
     expect(feature.state).toBe("ready");
     expect((await repo.getStatus()).features.ready).toBe(1);
 
-    const doing = await repo.startFeature(feature.id);
+    const doing = await repo.startWork(feature.id, { type: "agent", name: "builder", role: "implementer" });
     expect(doing.state).toBe("doing");
-    await expect(fs.readdir(path.join(root, ".stonvik/runtime/runs"))).resolves.toHaveLength(1);
+    await expect(repo.getWorkClaim(feature.id)).resolves.toMatchObject({ actor: { name: "builder", role: "implementer" } });
     expect(await repo.inspectExecutionMode(feature.id)).toEqual({ kind: "direct" });
 
-    const review = await repo.submitForReview(feature.id);
-    expect(review.state).toBe("review");
+    await repo.recordExternalExecutionReport(feature.id, {
+      schemaVersion: 1,
+      actor: { type: "agent", name: "builder", role: "implementer" },
+      outcome: "completed",
+      summary: "Implementation completed.",
+    });
+    const review = await repo.verifyWork(feature.id);
+    expect(review.outcome).toBe("passed");
 
-    const done = await repo.reviewFeature(feature.id, "approved", "Reviewed in test.");
+    const approved = await repo.reviewWork(feature.id, { type: "human", name: "reviewer", role: "reviewer" }, "approved", "Reviewed in test.");
+    expect(approved.state).toBe("review");
+    const done = await repo.shipWork(feature.id);
     expect(done.state).toBe("done");
   });
 
@@ -107,7 +115,16 @@ describe("FilesystemStonvikRepository", () => {
     await expect(fs.readdir(path.join(feature.path, "provenance", "classification"))).resolves.toEqual([`${inbox.id}-run-test.yaml`]);
     await expect(fs.readdir(path.join(root, "product", "inbox-receipts"))).resolves.toEqual([]);
 
-    const done = await repo.startFeature(feature.id).then((item) => repo.submitForReview(item.id)).then((item) => repo.reviewFeature(item.id, "approved", "Reviewed."));
+    await repo.startWork(feature.id, { type: "agent", name: "builder", role: "implementer" });
+    await repo.recordExternalExecutionReport(feature.id, {
+      schemaVersion: 1,
+      actor: { type: "agent", name: "builder", role: "implementer" },
+      outcome: "completed",
+      summary: "Implementation completed.",
+    });
+    await repo.verifyWork(feature.id);
+    await repo.reviewWork(feature.id, { type: "human", name: "reviewer", role: "reviewer" }, "approved", "Reviewed.");
+    const done = await repo.shipWork(feature.id);
     await expect(fs.stat(path.join(done.path, "provenance", "inbox", path.basename(inbox.path)))).resolves.toBeTruthy();
     await expect(repo.validate()).resolves.toMatchObject({ valid: true });
   });
@@ -155,38 +172,11 @@ describe("FilesystemStonvikRepository", () => {
     await expect(repo.validate()).resolves.toMatchObject({ valid: true });
   });
 
-  it("migrates legacy promoted Inbox provenance without deleting evidence", async () => {
+  it("does not infer an implementation method from user-owned documents", async () => {
     const { root, repo } = await tempRepo();
-    const inbox = await repo.capture({ text: "Add notifications" });
-    const feature = await repo.createFeature({
-      title: "Add notifications",
-      goal: "Notify users about updates.",
-      acceptance: ["Users see notifications."],
-      source: { type: "inbox", ref: inbox.id },
-      verification: { commands: [{ name: "pass", run: "true" }] },
-    });
-    await repo.recordClassification(inbox, {
-      route: "auto_direct", size: "XS", estimatedTouchedFiles: 1, complexityScore: 1, confidence: 0.9, risks: [], rationale: ["Small change."],
-      proposed: { title: "Add notifications", goal: "Notify users about updates.", acceptance: ["Users see notifications."], verification: { commands: [{ name: "pass", run: "true" }] } },
-    }, "run-legacy");
-    await fs.writeFile(inbox.path, (await fs.readFile(inbox.path, "utf8"))
-      .replace("status: captured\n", `status: promoted\nfeatureRef: ${feature.id}\n`));
-
-    await expect(repo.migrateInboxProvenance()).resolves.toEqual({ migrated: [inbox.id], skipped: [] });
-    await expect(fs.readFile(path.join(root, "features", "ready", "add-notifications", "provenance", "inbox", path.basename(inbox.path)), "utf8")).resolves.toContain(`featureRef: ${feature.id}`);
-    await expect(repo.validate()).resolves.toMatchObject({ valid: true });
-  });
-
-  it("detects spec-flow execution profiles", async () => {
-    const { repo } = await tempRepo();
     const feature = await repo.createFeature({ title: "Progressive Web App", goal: "Make storefronts installable.", acceptance: ["Manifest exists"], verification: { commands: [{ name: "pass", run: "true" }] } });
-    await fs.writeFile(path.join(feature.path, "spec.md"), "# Spec");
-    const needsPlan = await repo.inspectExecutionMode(feature.id);
-    expect(needsPlan.kind).toBe("spec-needs-plan");
-    expect(needsPlan).toMatchObject({ commands: expect.objectContaining({ init: expect.stringContaining(feature.path), implement: expect.stringContaining(feature.path) }) });
-    await fs.mkdir(path.join(feature.path, "tickets"));
-    const specFlow = await repo.inspectExecutionMode(feature.id);
-    expect(specFlow.kind).toBe("spec-flow");
-    expect(specFlow).toMatchObject({ commands: expect.objectContaining({ implement: expect.stringContaining(feature.path), next: expect.stringContaining(feature.path) }) });
+    await fs.writeFile(path.join(root, "spec.md"), "The team owns this format.");
+    await fs.mkdir(path.join(root, "tickets"));
+    expect(await repo.inspectExecutionMode(feature.id)).toEqual({ kind: "direct" });
   });
 });

@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { FilesystemStonvikRepository, PiRpcExecutionAdapter, buildPiPrompt, parsePiResult } from "../../core/index.js";
+import { FilesystemStonvikRepository } from "../../core/index.js";
+import { PiRpcExecutionAdapter, buildPiPrompt, parsePiResult } from "../../integrations/pi/pi-rpc-execution-adapter.js";
 
 describe("Pi RPC execution adapter", () => {
   it("maps the documented RPC event stream to a typed result", async () => {

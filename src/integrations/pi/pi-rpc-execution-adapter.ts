@@ -90,9 +90,7 @@ export class PiRpcExecutionAdapter implements ExecutionAdapter {
 }
 
 export function buildPiPrompt(request: ExecutionRequest): string {
-  const profile = request.profile.kind === "direct"
-    ? "Implement the Feature directly."
-    : `Follow the repository's spec-driven workflow using ${request.profile.specPath}.`;
+  const profile = "Implement the Feature using the implementer's own repository workflow.";
   return [
     "You are the execution engine for Stonevik.",
     `Work only inside repository: ${request.root}`,
@@ -118,7 +116,7 @@ export function parsePiResult(text: string): ExecutionResult {
   try {
     const structured = JSON.parse(markerValue) as Partial<ExecutionResult>;
     if (typeof structured.outcome === "string" && ["completed", "verification_failed", "blocked", "needs_human", "cancelled"].includes(structured.outcome)) return { ...structured, outcome: structured.outcome as ExecutionResult["outcome"], summary: typeof structured.summary === "string" ? structured.summary : `Pi reported ${structured.outcome}.` };
-  } catch { /* legacy marker has no JSON payload */ }
+  } catch { /* The marker may omit its optional JSON payload. */ }
   const outcome = match[1]!.toLowerCase() as ExecutionResult["outcome"];
   return { outcome, summary: `Pi reported ${outcome}.` };
 }

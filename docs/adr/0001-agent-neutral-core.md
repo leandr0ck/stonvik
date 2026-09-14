@@ -11,7 +11,7 @@ Stonvik must coordinate durable Work without requiring a particular agent runtim
 
 Keep the core responsible for domain contracts, routing policy, filesystem state, claims, deterministic verification, review gates, receipts, and handoffs. The core accepts classification, execution, and review through injected interfaces or structured external reports. It never creates an agent process or reads agent-specific runtime configuration.
 
-Pi and Spec Flow remain optional adapters under `src/integrations/pi/`. The old `src/core/execution` exports remain compatibility shims for existing consumers; new code must import the integration directly. The CLI is the compatibility integration that wires those adapters when Pi is explicitly configured or requested. With no Pi request, the CLI uses deterministic classification and stops at the neutral handoff boundary when external execution is unavailable.
+Pi remains an optional adapter under `src/integrations/pi/`; no document filename or content selects an adapter. There are no compatibility shims or runtime-specific CLI paths. The CLI exposes only the neutral workflow and stops at the external handoff boundary: the selected actor owns implementation and submits a structured execution report.
 
 ## Alternatives rejected
 
@@ -24,5 +24,5 @@ Pi and Spec Flow remain optional adapters under `src/integrations/pi/`. The old 
 - Work can be claimed and advanced by humans, agents, CI, or processes using the same JSON/YAML contracts.
 - State transitions and audit evidence remain deterministic and testable without an LLM.
 - Pi-specific dependencies and configuration are isolated at the integration boundary.
-- Existing `run`, `triage`, and `implement` commands remain available during migration, but direct Work commands (`prepare`, `next`, `work start/report/review`, `verify`, and `handoff`) are the stable agent-neutral interface.
+- The workflow is explicit and minimal: `capture`, `triage`, `define`, `next`, `work start/report/review`, `verify`, and `ship`. User-owned specs and ADRs are referenced from the manifest without an imposed editorial format.
 - Integrations must not write Work state directly; they return execution/review data to the repository API.

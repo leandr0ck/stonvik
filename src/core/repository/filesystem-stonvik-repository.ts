@@ -5,13 +5,13 @@ import os from "node:os";
 import { exec as execCallback } from "node:child_process";
 import { promisify } from "node:util";
 import YAML from "yaml";
-import type { ActorRef, CaptureInput, ClarificationField, Classification, CreateFeatureInput, ExecutionProfile, ExternalExecutionEvidence, ExternalExecutionReport, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, RoutingDecision, RoutingPolicy, RunEvent, ValidationReport, VerificationReceipt, WorkHandoff, WorkKind, WorkClaim } from "../domain/types.js";
+import type { ActorRef, CaptureInput, ClarificationField, Classification, CreateFeatureInput, DefinitionRef, ExecutionProfile, ExternalExecutionEvidence, ExternalExecutionReport, Feature, FeatureManifest, FeatureState, InboxItem, Receipt, ReceiptEvidence, RepositoryStatus, ReviewDecision, RoutingDecision, RoutingPolicy, RunEvent, ValidationReport, VerificationReceipt, WorkHandoff, WorkClaim } from "../domain/types.js";
 import { FEATURE_STATES } from "../domain/types.js";
-import { ActorInvalidError, FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, StonvikNotInitializedError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, LoopAlreadyRunningError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError, WorkClaimConflictError, WorkReportInvalidError, SpecificationInvalidError, SpecificationNotApprovedError, ReviewActorInvalidError, ReviewSelfApprovalError } from "../errors/stonvik-errors.js";
+import { ActorInvalidError, FeatureAlreadyExistsError, FeatureNotFoundError, FeatureStateConflictError, StonvikNotInitializedError, InvalidInboxItemError, InvalidManifestError, InvalidReceiptError, InvalidStateTransitionError, LoopAlreadyRunningError, ReceiptAlreadyExistsError, ReviewReceiptRequiredError, WorkClaimConflictError, WorkReportInvalidError, ReviewActorInvalidError, ReviewSelfApprovalError } from "../errors/stonvik-errors.js";
 import { InboxFrontmatterSchema } from "../schemas/inbox.schema.js";
 import { ManifestSchema } from "../schemas/manifest.schema.js";
 import { ReceiptSchema } from "../schemas/receipt.schema.js";
-import { DefinitionDocumentSchema, DefinitionMetadataSchema } from "../schemas/definition.schema.js";
+import { DefinitionRefsSchema } from "../schemas/definition.schema.js";
 import { ClassificationReceiptSchema } from "../schemas/classification-receipt.schema.js";
 import { RunEventSchema } from "../schemas/run-event.schema.js";
 import { ActorRefSchema } from "../schemas/actor.schema.js";
@@ -21,12 +21,10 @@ import { WorkClaimSchema } from "../schemas/work-claim.schema.js";
 import { WorkHandoffSchema } from "../schemas/handoff.schema.js";
 import { routingPolicyFromConfig, buildRoutingDecision, validateRoutingDecisionShape, type RoutingSignalOverrides } from "../services/routing.js";
 import { createWorkHandoff } from "../services/work-handoff.js";
-import { deriveImplementationFromSpecification, renderSpecificationTemplate, validateSpecificationDocument } from "../services/specification.js";
 import { loadCoreConfig } from "../services/config.js";
 import { actorKey, sameActor } from "../services/actors.js";
 import { isoNow, shortId, slugify, timestampForFile } from "../services/id.js";
 import { validateClassification } from "../services/classification.js";
-import { specFlowCommandsForSpec } from "../services/spec-flow-commands.js";
 import { canTransition } from "../transitions/transition-rules.js";
 import { stonvikPaths } from "./paths.js";
 import type { ExecutionOutcome, ExecutionResult } from "../execution/execution-adapter.js";
@@ -188,7 +186,7 @@ export class FilesystemStonvikRepository {
     return items.sort((a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
   }
 
-  async moveToReview(item: InboxItem, questions: string, definitionKind?: "spec" | "adr"): Promise<InboxItem> {
+  async moveToReview(item: InboxItem, questions: string): Promise<InboxItem> {
     const current = await this.readInboxFile(item.path);
     if (current.id !== item.id) throw new InvalidInboxItemError(`Inbox item does not match: ${item.id}`);
     if (current.status === "needs_review") return current;
@@ -196,15 +194,10 @@ export class FilesystemStonvikRepository {
     await fs.mkdir(reviewDir, { recursive: true });
     const destPath = path.join(reviewDir, path.basename(item.path));
     if (await exists(destPath)) throw new InvalidInboxItemError(`Review item already exists: ${path.relative(this.root, destPath)}`);
-    const reviewed = { ...current, status: "needs_review" as const, path: destPath, definitionKind: definitionKind ?? current.definitionKind };
+    const reviewed = { ...current, status: "needs_review" as const, path: destPath };
     const timestamp = new Date().toISOString();
-    const template = definitionKind === "spec"
-      ? `\n\n## Context\n\n${current.body ?? current.title}\n\n## Objetivo\n\n_TBD_\n\n## Criterios de aceptación\n\n- _TBD_\n\n## Verificación\n\n- _TBD_\n`
-      : definitionKind === "adr"
-      ? `\n\n## Contexto\n\n${current.body ?? current.title}\n\n## Decisión\n\n_TBD_\n\n## Consecuencias\n\n_TBD_\n`
-      : "";
-    const reviewBlock = `\n\n<!-- stonvik:review -->\n> **Stonevik — needs review** (${timestamp})\n${questions.split("\n").map((l) => `> ${l}`).join("\n")}\n`;
-    await this.writeFileAtomic(destPath, this.renderInbox(reviewed) + template + reviewBlock);
+    const reviewBlock = `\n\n<!-- stonvik:review -->\n> **Stonvik — needs review** (${timestamp})\n${questions.split("\n").map((l) => `> ${l}`).join("\n")}\n`;
+    await this.writeFileAtomic(destPath, this.renderInbox(reviewed) + reviewBlock);
     await fs.rm(item.path, { force: true });
     return reviewed;
   }
@@ -221,122 +214,37 @@ export class FilesystemStonvikRepository {
   }
 
 
-  /**
-   * Extract the inline spec/adr content from an inbox item's body.
-   * The content is everything after the H1 title and before the
-   * "<!-- stonvik:review -->" delimiter. Returns undefined if no
-   * meaningful content exists (only _TBD_ placeholders).
-   */
-  extractInlineSpec(item: InboxItem): string | undefined {
-    if (!item.body) return undefined;
-    const delimiter = item.body.indexOf("<!-- stonvik:review -->");
-    const content = delimiter >= 0 ? item.body.slice(0, delimiter).trim() : item.body.trim();
-    if (!content) return undefined;
-    const stripped = content.replace(/_TBD_/g, "").replace(/- +$/gm, "").trim();
-    if (stripped.length < 20) return undefined;
-    return content;
+  /** Record the triage decision without creating executable Work. */
+  async triageInbox(
+    inboxId: string,
+    options: {
+      route: RoutingDecision["route"];
+      actor: ActorRef;
+      signals?: RoutingSignalOverrides;
+      policy?: RoutingPolicy;
+    },
+  ): Promise<InboxItem> {
+    const current = await this.requireInbox(inboxId);
+    if (current.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${inboxId}`);
+    const actor = this.assertActor(options.actor, "triager");
+    const config = await loadCoreConfig(this.root);
+    const decision = buildRoutingDecision(current, options.route, actor, options.signals, options.policy ?? routingPolicyFromConfig(config));
+    const status = options.route === "direct" ? "captured" : "needs_definition";
+    const triaged = { ...current, status: status as InboxItem["status"], routingDecision: decision };
+    await this.writeInboxItem(triaged);
+    return triaged;
   }
 
-  renderSpecDocument(item: InboxItem, inlineSpec: string): string {
-    const source = `inbox: ${item.id}`;
-    const meta = [
-      "---",
-      YAML.stringify({
-        stonvik: {
-          schemaVersion: 1,
-          source: { type: "inbox", ref: item.id },
-          title: item.title,
-          goal: item.classification?.proposed?.goal ?? item.title,
-          acceptance: item.classification?.proposed?.acceptance ?? [],
-          verification: item.classification?.proposed?.verification ?? { commands: [] },
-        },
-      }),
-      "---",
-      "",
-    ].join("\n");
-    return meta + inlineSpec + "\n";
-  }
-
-  async requireDefinitionForInbox(id: string, kind: "spec" | "adr", legacyReference = false): Promise<InboxItem> {
-    const item = await this.requireInbox(id);
-    return this.requireDefinitionForInboxItem(item, kind, legacyReference);
-  }
-
-  async requireDefinitionForInboxItem(item: InboxItem, kind: "spec" | "adr", legacyReference = false): Promise<InboxItem> {
-    const current = await this.readInboxFile(item.path);
-    if (current.id !== item.id || current.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${item.id}`);
-    const slug = `${slugify(current.title)}-${current.id.slice(-5)}`;
-    const definitionDir = this.paths.definitionDir(slug);
-    const definitionPath = path.join(definitionDir, kind === "spec" ? "spec.md" : "adr.md");
-    if (await exists(definitionDir)) throw new InvalidInboxItemError(`Definition already exists: ${path.relative(this.root, definitionDir)}`);
-    await fs.mkdir(definitionDir, { recursive: false });
-    try {
-      await this.writeFileAtomic(path.join(definitionDir, "definition.yaml"), YAML.stringify({ schemaVersion: 1, inboxRef: current.id, kind, created: isoNow(), document: path.basename(definitionPath) }));
-      await this.writeFileAtomic(definitionPath, this.renderDefinitionTemplate(current, kind));
-    } catch (error) {
-      await fs.rm(definitionDir, { recursive: true, force: true });
-      throw error;
+  /** Create ready Work from a triaged Inbox item and user-owned definitions. */
+  async defineWorkFromInbox(inboxId: string, input: Omit<CreateFeatureInput, "source">): Promise<Feature> {
+    const item = await this.requireInbox(inboxId);
+    if (item.status !== "captured" && item.status !== "needs_definition") throw new InvalidInboxItemError(`Inbox item cannot be defined: ${inboxId}`);
+    const route = item.routingDecision?.route;
+    const definitions = input.definitions ?? [];
+    if (route && route !== "direct" && !definitions.some((definition) => definition.kind === route)) {
+      throw new InvalidInboxItemError(`Triage route ${route} requires a matching user-owned definition.`);
     }
-    let referencePath = definitionPath;
-    if (legacyReference) {
-      referencePath = path.join(kind === "spec" ? this.paths.specs : this.paths.adrs, `${slug}.md`);
-      await this.writeFileAtomic(referencePath, await fs.readFile(definitionPath, "utf8"));
-    }
-    const needsDefinition = { ...current, status: "needs_definition" as const, definitionRef: path.relative(this.root, referencePath), definitionKind: kind };
-    await this.writeInboxItem(needsDefinition);
-    return needsDefinition;
-  }
-
-  async confirmDefinitionForInbox(id: string): Promise<Feature> {
-    const item = await this.requireInbox(id);
-    return this.confirmDefinitionForInboxItem(item);
-  }
-
-
-  /**
-   * Promote an inbox item with inline spec content to a ready Work feature.
-   * Creates the definition directory, writes the definition.yaml metadata,
-   * writes the spec/adr document, and then confirms and creates the feature.
-   */
-  async promoteInlineDefinition(item: InboxItem, specContent: string): Promise<Feature> {
-    const current = await this.readInboxFile(item.path);
-    if (current.id !== item.id) throw new InvalidInboxItemError(`Inbox item does not match: ${item.id}`);
-    if (!current.definitionKind) throw new InvalidInboxItemError(`Inbox item has no definition kind: ${item.id}`);
-    const slug = `${slugify(current.title)}-${current.id.slice(-5)}`;
-    const defDir = this.paths.definitionDir(slug);
-    await fs.mkdir(defDir, { recursive: true });
-    const docName = current.definitionKind === "spec" ? "spec.md" : "adr.md";
-    const specPath = path.join(defDir, docName);
-    await this.writeFileAtomic(specPath, specContent);
-    const metadata = {
-      schemaVersion: 1,
-      inboxRef: current.id,
-      kind: current.definitionKind,
-      document: docName,
-    };
-    await this.writeFileAtomic(path.join(defDir, "definition.yaml"), YAML.stringify(metadata));
-    const relSpecPath = path.relative(this.root, specPath);
-    const updated = { ...current, status: "needs_definition" as const, definitionRef: relSpecPath, path: item.path };
-    await this.writeInboxItem(updated);
-    const definition = await this.readDefinitionWorkDefinition(specPath, updated);
-    return this.createFeatureFromInboxItem(updated, definition);
-  }
-
-  async confirmDefinitionForInboxItem(item: InboxItem): Promise<Feature> {
-    const current = await this.readInboxFile(item.path);
-    if (current.id !== item.id || current.status !== "needs_definition" || !current.definitionRef || !current.definitionKind) throw new InvalidInboxItemError(`Inbox item does not require a definition: ${item.id}`);
-    const referencedPath = path.resolve(this.root, current.definitionRef);
-    const internalDir = this.paths.definitionDir(`${slugify(current.title)}-${current.id.slice(-5)}`);
-    const allowedReference = isWithin(this.paths.definitions, referencedPath)
-      || isWithin(current.definitionKind === "spec" ? this.paths.specs : this.paths.adrs, referencedPath);
-    const documentPath = referencedPath;
-    if (!allowedReference) throw new InvalidInboxItemError(`Definition path is outside the definition tree: ${current.definitionRef}`);
-    if (!(await exists(documentPath)) || !(await exists(internalDir))) throw new InvalidInboxItemError(`Definition is missing: ${current.definitionRef}`);
-    const metadataPath = path.join(internalDir, "definition.yaml");
-    const metadata = DefinitionMetadataSchema.safeParse(YAML.parse(await fs.readFile(metadataPath, "utf8")));
-    if (!metadata.success || metadata.data.inboxRef !== current.id || metadata.data.kind !== current.definitionKind || (metadata.data.document !== path.basename(documentPath) && metadata.data.document !== (current.definitionKind === "spec" ? "spec.md" : "adr.md"))) throw new InvalidInboxItemError(`Definition metadata is invalid: ${current.definitionRef}`);
-    const definition = await this.readDefinitionWorkDefinition(documentPath, current);
-    return this.createFeatureFromInboxItem(current, definition);
+    return this.createFeatureFromInboxItem(item, { ...input, definitions: definitions.length ? definitions : undefined });
   }
 
   async mergeInbox(id: string, featureId: string): Promise<InboxItem> {
@@ -353,9 +261,6 @@ export class FilesystemStonvikRepository {
     const id = input.id ?? `feature-${slug}`;
     const featurePath = this.paths.featureDir("ready", slug);
     if (await this.featureIdExists(id) || await exists(featurePath)) throw new FeatureAlreadyExistsError(id);
-    const kind = input.kind ?? "implementation";
-    if (kind === "specification" && input.specDocument === undefined) throw new SpecificationInvalidError("Specification Work requires a spec.md document.");
-    if (kind === "specification" && input.verification.review !== "required") throw new SpecificationInvalidError("Specification Work requires an explicit review gate.");
     let routingDecision: RoutingDecision | undefined;
     try {
       routingDecision = input.routingDecision ? RoutingDecisionSchema.parse(input.routingDecision) as RoutingDecision : undefined;
@@ -366,7 +271,6 @@ export class FilesystemStonvikRepository {
     const manifest: FeatureManifest = {
       schemaVersion: 1,
       id,
-      kind,
       title: input.title,
       created: isoNow(),
       source: input.source,
@@ -376,15 +280,19 @@ export class FilesystemStonvikRepository {
       verification: input.verification,
       classification: input.classification,
       routingDecision,
+      definitions: input.definitions,
       routingDecisionRef,
-      specificationRef: input.specificationRef,
-      deliverables: input.deliverables ?? (kind === "specification" ? ["spec.md"] : undefined),
     };
     try {
       if (manifest.classification) validateClassification(manifest.classification);
       if (manifest.routingDecision) validateRoutingDecisionShape(manifest.routingDecision);
     } catch (error) {
       throw new InvalidManifestError(`Invalid Work metadata: ${String((error as Error).message)}`);
+    }
+    if (input.definitions !== undefined) {
+      const parsedDefinitions = DefinitionRefsSchema.safeParse(input.definitions);
+      if (!parsedDefinitions.success) throw new InvalidManifestError(parsedDefinitions.error.message);
+      await this.validateDefinitionReferences(input.definitions);
     }
     const parsed = ManifestSchema.safeParse(manifest);
     if (!parsed.success) throw new InvalidManifestError(parsed.error.message);
@@ -393,7 +301,6 @@ export class FilesystemStonvikRepository {
     await fs.mkdir(staging, { recursive: false });
     try {
       await this.writeFileAtomic(path.join(staging, "manifest.yaml"), YAML.stringify(normalizedManifest));
-      if (input.specDocument !== undefined) await this.writeFileAtomic(path.join(staging, "spec.md"), input.specDocument);
       if (routingDecision) {
         const routingRef = routingDecisionRef ?? "routing-decision.yaml";
         const routingPath = path.resolve(staging, routingRef);
@@ -406,67 +313,6 @@ export class FilesystemStonvikRepository {
       throw error;
     }
     return this.readFeature(featurePath, "ready");
-  }
-
-  /** Prepare a captured Inbox item without invoking an agent or interpreting a session. */
-  async prepareWork(
-    inboxId: string,
-    options: {
-      route: "direct" | "spec-first";
-      actor: ActorRef;
-      signals?: RoutingSignalOverrides;
-      policy?: RoutingPolicy;
-    },
-  ): Promise<Feature> {
-    const item = await this.requireInbox(inboxId);
-    if (item.status !== "captured") throw new InvalidInboxItemError(`Inbox item is not captured: ${inboxId}`);
-    const actor = this.assertActor(options.actor, "triager");
-    const config = await loadCoreConfig(this.root);
-    const decision = buildRoutingDecision(item, options.route, actor, options.signals, options.policy ?? routingPolicyFromConfig(config));
-    const routedItem = { ...item, routingDecision: decision };
-    await this.writeInboxItem(routedItem);
-
-    const literalPaths = extractRepositoryPaths(`${item.title}\n${item.body ?? ""}`);
-    const verification = directVerificationPolicy(literalPaths);
-    const acceptance = [item.body?.trim() || `The requested Work \`${item.title}\` is implemented.`];
-    try {
-      if (options.route === "spec-first") {
-        const title = `${item.title} specification`;
-        return await this.createFeatureFromInboxItem(routedItem, {
-          id: `feature-${slugify(item.title)}-spec`,
-          slug: `${slugify(item.title)}-spec`,
-          kind: "specification",
-          title,
-          goal: `Produce an approved specification for ${item.title}.`,
-          acceptance: ["spec.md contains non-empty problem, scope, acceptance, constraints, and verification sections."],
-          constraints: ["The specification must resolve the captured intent without implementing it."],
-          verification: { commands: [{ name: "specification-structure", run: "true" }], review: "required" },
-          deliverables: ["spec.md"],
-          specDocument: renderSpecificationTemplate(item.title, item.body),
-          routingDecision: decision,
-          routingDecisionRef: `provenance/routing/${item.id}.yaml`,
-        });
-      }
-
-      return await this.createFeatureFromInboxItem(routedItem, {
-        kind: "implementation",
-        title: item.title,
-        goal: item.body?.trim() || item.title,
-        acceptance,
-        verification,
-        routingDecision: decision,
-        routingDecisionRef: `provenance/routing/${item.id}.yaml`,
-      });
-    } catch (error) {
-      // Do not leave a routing decision on an Inbox item when Work creation
-      // failed; the decision is durable again only with the promoted Work.
-      if (await exists(item.path)) await this.writeInboxItem(item);
-      throw error;
-    }
-  }
-
-  async prepareInbox(inboxId: string, options: Parameters<FilesystemStonvikRepository["prepareWork"]>[1]): Promise<Feature> {
-    return this.prepareWork(inboxId, options);
   }
 
   /** Claim ready Work, or resume unclaimed doing Work after a failed/reviewed attempt. */
@@ -659,51 +505,30 @@ export class FilesystemStonvikRepository {
     const receipt = this.createActorReviewReceipt(feature, actor, decision, normalizedSummary, findings, runId);
     await this.persistReceipt(feature, receipt);
     if (decision === "needs_human") return feature;
-    const next = decision === "approved" ? "done" : decision === "changes_requested" ? "doing" : "blocked";
+    if (decision === "approved") return feature;
+    const next = decision === "changes_requested" ? "doing" : "blocked";
     const updated = await this.transition(id, next);
     if (next === "blocked") await fs.appendFile(path.join(updated.path, "notes.md"), `\n## Blocked ${isoNow()}\n\n${normalizedSummary}\n`);
     await this.releaseWorkClaim(updated.id);
     return updated;
   }
 
-  async validateSpecification(id: string): Promise<ReturnType<typeof validateSpecificationDocument>> {
+  /** Ship reviewed Work after an independent approval and current verification. */
+  async shipWork(id: string): Promise<Feature> {
     const feature = await this.requireFeature(id);
-    const documentPath = path.join(feature.path, "spec.md");
-    try {
-      const content = await fs.readFile(documentPath, "utf8");
-      return validateSpecificationDocument(content, path.relative(this.root, documentPath));
-    } catch {
-      return validateSpecificationDocument("", path.relative(this.root, documentPath));
+    if (feature.state !== "review") throw new InvalidStateTransitionError(feature.state, "done");
+    const receipts = await this.listReceipts(id);
+    const latest = <T extends Receipt["kind"]>(kind: T) => [...receipts].reverse().find((receipt): receipt is Extract<Receipt, { kind: T }> => receipt.kind === kind);
+    const review = latest("review");
+    if (!review || review.decision !== "approved") throw new ReviewReceiptRequiredError(id);
+    const execution = [...receipts].reverse().find((receipt) => receipt.kind === "execution" && receipt.outcome === "completed");
+    const verification = latest("verification");
+    if (!execution || !verification || verification.outcome !== "passed" || verification.created < execution.created || review.created < verification.created) {
+      throw new ReviewReceiptRequiredError(id);
     }
-  }
-
-  async createImplementationFromSpecification(specificationId: string): Promise<Feature> {
-    const specification = await this.requireFeature(specificationId);
-    if ((specification.manifest.kind ?? "implementation") !== "specification" || specification.state !== "done") {
-      throw new SpecificationNotApprovedError(specificationId);
-    }
-    const receipts = await this.listReceipts(specificationId);
-    if (!receipts.some((receipt) => receipt.kind === "review" && receipt.decision === "approved")) throw new SpecificationNotApprovedError(specificationId);
-    const documentPath = path.join(specification.path, "spec.md");
-    if (!isWithin(specification.path, documentPath) || !(await exists(documentPath))) throw new SpecificationInvalidError(`Specification document is missing: ${documentPath}`);
-    const content = await fs.readFile(documentPath, "utf8");
-    const validation = validateSpecificationDocument(content, path.relative(this.root, documentPath));
-    if (!validation.valid) throw new SpecificationInvalidError(validation.issues.map((issue) => issue.message).join(" "));
-    const contract = deriveImplementationFromSpecification(specification.manifest, content);
-    const decision = specification.manifest.routingDecision;
-    return this.createFeature({
-      ...contract,
-      id: `feature-${slugify(contract.title)}`,
-      slug: slugify(contract.title),
-      kind: "implementation",
-      source: { type: "specification", ref: specification.id },
-      specificationRef: specification.id,
-      ...(decision ? { routingDecision: decision, routingDecisionRef: `provenance/routing/${specification.id}.yaml` } : {}),
-    });
-  }
-
-  async createFeatureFromSpec(specificationId: string): Promise<Feature> {
-    return this.createImplementationFromSpecification(specificationId);
+    const shipped = await this.transition(id, "done");
+    await this.releaseWorkClaim(shipped.id);
+    return shipped;
   }
 
   async recordClassification(item: InboxItem, classification: Classification, runId: string): Promise<void> {
@@ -748,23 +573,6 @@ export class FilesystemStonvikRepository {
     return feature;
   }
 
-  async migrateInboxProvenance(): Promise<{ migrated: string[]; skipped: Array<{ inboxId: string; reason: string }> }> {
-    await this.assertInitialized();
-    const migrated: string[] = [];
-    const skipped: Array<{ inboxId: string; reason: string }> = [];
-    for (const item of await this.listInbox()) {
-      if ((item.status !== "promoted" && item.status !== "merged") || !item.featureRef) continue;
-      const feature = await this.getFeature(item.featureRef);
-      if (!feature) {
-        skipped.push({ inboxId: item.id, reason: `Referenced Work does not exist: ${item.featureRef}` });
-        continue;
-      }
-      await this.moveInboxProvenance(item, feature, item.status);
-      migrated.push(item.id);
-    }
-    return { migrated, skipped };
-  }
-
   async listReceipts(featureId: string): Promise<Receipt[]> {
     const feature = await this.requireFeature(featureId);
     const receipts: Receipt[] = [];
@@ -790,25 +598,8 @@ export class FilesystemStonvikRepository {
     const checks: VerificationReceipt["checks"] = [];
     let evidence: ReceiptEvidence[] | undefined;
     let outcome: VerificationReceipt["outcome"] = "not_configured";
-    let specificationValid = true;
 
-    if (feature.manifest.kind === "specification") {
-      const documentPath = path.join(feature.path, "spec.md");
-      const document = await fs.readFile(documentPath, "utf8").catch(() => "");
-      const specification = validateSpecificationDocument(document, path.relative(this.root, documentPath));
-      specificationValid = specification.valid;
-      checks.push({
-        name: "specification-structure",
-        command: "stonvik specification structure",
-        cwd: ".",
-        exitCode: specification.valid ? 0 : 1,
-        durationMs: 0,
-        status: specification.valid ? "passed" : "failed",
-        outputSummary: specification.valid ? "Required specification sections are present." : specification.issues.map((issue) => issue.message).join(" "),
-      });
-    }
-
-    if (policy && specificationValid) {
+    if (policy) {
       for (const command of policy.commands) {
         const started = Date.now();
         try {
@@ -828,7 +619,6 @@ export class FilesystemStonvikRepository {
       else outcome = "passed";
     }
 
-    if (!specificationValid) outcome = "failed";
     const receipt = this.createVerificationReceipt(feature, runId, outcome, checks, evidence);
     await options.onEvent?.({ type: outcome === "passed" ? "receipt" : "gate", kind: "verification.finished", phase: "verification", severity: outcome === "passed" ? "info" : "error", workId: feature.id, message: `Verification finished with outcome ${outcome}.`, nextAction: outcome === "passed" ? "Continue to independent review." : "Inspect verification evidence before retrying." });
     await this.persistReceipt(feature, receipt);
@@ -840,14 +630,6 @@ export class FilesystemStonvikRepository {
     return receipt;
   }
 
-  async reviewFeature(id: string, decision: ReviewDecision, summary: string, actorName = "stonvik", findings?: string[], runId?: string): Promise<Feature> {
-    const feature = await this.requireFeature(id);
-    if (feature.state !== "review") throw new InvalidStateTransitionError(feature.state, "review");
-    await this.persistReceipt(feature, this.createReviewReceipt(feature, decision, summary, actorName, findings, runId));
-    if (decision === "needs_human") return feature;
-    return this.transition(id, decision === "approved" ? "done" : decision === "changes_requested" ? "doing" : "blocked");
-  }
-
   async executeFeature(id: string, registry: ExecutionAdapterRegistry, signal?: AbortSignal, options: { runId?: string; onEvent?: RepositoryEventCallback } = {}): Promise<{ outcome: ExecutionOutcome | "needs_human"; feature: Feature; summary: string; adapterId?: string; details?: Record<string, unknown> }> {
     const current = await this.requireFeature(id);
     if (current.state !== "ready" && current.state !== "doing") throw new InvalidStateTransitionError(current.state, "doing");
@@ -857,7 +639,8 @@ export class FilesystemStonvikRepository {
     const adapter = await registry.resolve(request);
     if (!adapter) return { outcome: "needs_human", feature: current, summary: "No execution adapter is available for this Feature." };
 
-    const doing = current.state === "ready" ? await this.startFeature(id) : current;
+    const executionActor: ActorRef = { type: "process", name: adapter.id, role: "implementer" };
+    const doing = current.state === "ready" ? await this.startWork(id, executionActor, runId) : current;
     if (current.state === "ready") await options.onEvent?.({ type: "transition", kind: "work.transitioned", phase: "execution", workId: doing.id, state: "doing", message: `Work ${doing.id} transitioned to doing.` });
     const activeProfile = await this.inspectExecutionMode(id);
     const fingerprint = await this.durableFeatureFingerprint(id);
@@ -881,7 +664,8 @@ export class FilesystemStonvikRepository {
       result = { outcome: "needs_human", summary: "Execution adapter failed before returning a structured result.", reason: String((error as Error).message) };
     }
     result.details = { ...(result.details ?? {}), featureFingerprint: fingerprint };
-    await this.persistReceipt(doing, this.createExecutionReceipt(doing, runId, adapter.id, result));
+    await this.persistReceipt(doing, this.createActorExecutionReceipt(doing, runId, executionActor, result.outcome, result.summary, result.artifacts, undefined, result.details));
+    await this.releaseWorkClaim(doing.id);
     if (result.outcome === "completed") {
       const verification = await this.verifyFeature(id, { runId, onEvent: options.onEvent });
       return { outcome: verification.outcome === "passed" ? result.outcome : verification.outcome === "manual_required" ? "needs_human" : "verification_failed", feature: (await this.requireFeature(id)), summary: result.summary, adapterId: adapter.id, details: result.details };
@@ -942,14 +726,6 @@ export class FilesystemStonvikRepository {
     return parts.join("|");
   }
 
-  async startFeature(id: string): Promise<Feature> { return this.transition(id, "doing", true); }
-  async submitForReview(id: string): Promise<Feature> { return this.transition(id, "review"); }
-  async completeFeature(id: string): Promise<Feature> {
-    const feature = await this.requireFeature(id);
-    if (!(await this.hasApprovedReviewReceipt(feature))) throw new ReviewReceiptRequiredError(id);
-    return this.transition(id, "done");
-  }
-  async returnToDoing(id: string): Promise<Feature> { return this.transition(id, "doing"); }
   async unblockFeature(id: string): Promise<Feature> { return this.transition(id, "ready"); }
   async blockFeature(id: string, reason: string): Promise<Feature> {
     const feature = await this.transition(id, "blocked");
@@ -958,16 +734,9 @@ export class FilesystemStonvikRepository {
   }
 
   async inspectExecutionMode(id: string): Promise<ExecutionProfile> {
-    const feature = await this.requireFeature(id);
-    const specPath = path.join(feature.path, "spec.md");
-    const ticketsPath = path.join(feature.path, "tickets");
-    const hasSpec = await exists(specPath);
-    const hasTickets = await exists(ticketsPath);
-    if (hasSpec && hasTickets) {
-      const commands = specFlowCommandsForSpec(specPath);
-      return { kind: "spec-flow", specPath, ticketsPath, commands: { implement: commands.implement, next: commands.next } };
-    }
-    if (hasSpec) return { kind: "spec-needs-plan", specPath, commands: specFlowCommandsForSpec(specPath) };
+    await this.requireFeature(id);
+    // Stonvik records the workflow gates but never infers an implementation
+    // method from filenames or document contents.
     return { kind: "direct" };
   }
 
@@ -1014,14 +783,6 @@ export class FilesystemStonvikRepository {
           lastSequence.set(runId, sequence);
         }
       } catch (error) { issues.push({ severity: "error", code: "INVALID_RUN_EVENT", message: String((error as Error).message), path: file }); }
-    }
-    for (const entry of await safeReaddir(this.paths.definitions)) {
-      const definitionDir = this.paths.definitionDir(entry);
-      try {
-        const metadata = DefinitionMetadataSchema.parse(YAML.parse(await fs.readFile(path.join(definitionDir, "definition.yaml"), "utf8")));
-        const documentPath = path.join(definitionDir, metadata.document);
-        if (!isWithin(definitionDir, documentPath) || !(await exists(documentPath))) throw new Error("Definition document is missing.");
-      } catch (error) { issues.push({ severity: "error", code: "INVALID_DEFINITION", message: String((error as Error).message), path: definitionDir }); }
     }
     for (const state of FEATURE_STATES) {
       for (const entry of await safeReaddir(this.paths.featureStateDir(state))) {
@@ -1070,7 +831,14 @@ export class FilesystemStonvikRepository {
   private validateExternalExecutionReferences(report: ExternalExecutionReport, featurePath: string): void {
     const existsInRepository = (reference: string): boolean => {
       if (!isSafeRepositoryPath(reference)) return false;
-      return fssync.existsSync(path.resolve(this.root, reference)) || fssync.existsSync(path.resolve(featurePath, reference));
+      return [path.resolve(this.root, reference), path.resolve(featurePath, reference)].some((candidate) => {
+        try {
+          const stat = fssync.lstatSync(candidate);
+          return !stat.isSymbolicLink();
+        } catch {
+          return false;
+        }
+      });
     };
     for (const artifact of report.artifacts ?? []) {
       if (isExternalUrl(artifact) || !existsInRepository(artifact)) throw new WorkReportInvalidError(`Invalid artifact path: ${artifact}`);
@@ -1081,22 +849,14 @@ export class FilesystemStonvikRepository {
     }
   }
 
-  private async transition(id: string, to: FeatureState, createLease = false): Promise<Feature> {
+  private async transition(id: string, to: FeatureState): Promise<Feature> {
     const feature = await this.requireFeature(id);
     if (!canTransition(feature.state, to)) throw new InvalidStateTransitionError(feature.state, to);
     ManifestSchema.parse(feature.manifest);
     const dest = this.paths.featureDir(to, feature.slug);
     if (await exists(dest)) throw new FeatureStateConflictError(`Destination already exists: ${dest}`);
     await fs.rename(feature.path, dest);
-    if (createLease) await this.createLease(feature.id);
     return this.readFeature(dest, to);
-  }
-
-  private async createLease(featureId: string): Promise<void> {
-    const runsDir = path.join(this.paths.runtime, "runs");
-    await fs.mkdir(runsDir, { recursive: true });
-    const runId = `run-${timestampForFile()}-${shortId()}`;
-    await this.writeFileAtomic(path.join(runsDir, `${runId}.json`), JSON.stringify({ runId, featureId, startedAt: isoNow(), host: os.hostname(), pid: process.pid }, null, 2));
   }
 
   private async requireFeature(id: string): Promise<Feature> { const feature = await this.getFeature(id); if (!feature) throw new FeatureNotFoundError(id); return feature; }
@@ -1166,6 +926,7 @@ export class FilesystemStonvikRepository {
 
   private async validateWorkMetadata(feature: Feature): Promise<void> {
     if (feature.manifest.classification) validateClassification(feature.manifest.classification);
+    await this.validateDefinitionReferences(feature.manifest.definitions);
     const decision = feature.manifest.routingDecision;
     if (!decision) return;
     validateRoutingDecisionShape(decision);
@@ -1207,27 +968,6 @@ export class FilesystemStonvikRepository {
       outcome,
       checks,
       evidence
-    };
-  }
-
-  private createReviewReceipt(feature: Feature, decision: ReviewDecision, summary: string, actorName: string, findings?: string[], runId?: string): Receipt {
-    return {
-      ...this.receiptBase(feature, "review", decision, summary, runId ?? `review-${timestampForFile()}-${shortId()}`, "reviewer", actorName),
-      kind: "review",
-      outcome: decision,
-      decision,
-      findings: findings?.length ? findings : undefined,
-    };
-  }
-
-  private createExecutionReceipt(feature: Feature, runId: string, engine: string, result: ExecutionResult): Receipt {
-    return {
-      ...this.receiptBase(feature, "execution", result.outcome, result.summary, runId, "executor", engine),
-      kind: "execution",
-      outcome: result.outcome,
-      engine,
-      artifacts: result.artifacts,
-      details: result.details,
     };
   }
 
@@ -1332,11 +1072,6 @@ export class FilesystemStonvikRepository {
     }
   }
 
-  private async hasApprovedReviewReceipt(feature: Feature): Promise<boolean> {
-    const receipts = await this.listReceipts(feature.id);
-    return receipts.some((receipt) => receipt.kind === "review" && receipt.decision === "approved");
-  }
-
   private async readFeature(featurePath: string, state: FeatureState): Promise<Feature> {
     const manifestPath = path.join(featurePath, "manifest.yaml");
     const manifest = ManifestSchema.parse(YAML.parse(await fs.readFile(manifestPath, "utf8"))) as FeatureManifest;
@@ -1347,10 +1082,7 @@ export class FilesystemStonvikRepository {
       path: featurePath,
       manifest,
       artifacts: {
-        spec: (await exists(path.join(featurePath, "spec.md"))) ? path.join(featurePath, "spec.md") : undefined,
-        ticketsDirectory: (await exists(path.join(featurePath, "tickets"))) ? path.join(featurePath, "tickets") : undefined,
         notes: (await exists(path.join(featurePath, "notes.md"))) ? path.join(featurePath, "notes.md") : undefined,
-        research: (await exists(path.join(featurePath, "research.md"))) ? path.join(featurePath, "research.md") : undefined,
         receiptsDirectory: (await exists(path.join(featurePath, "receipts"))) ? path.join(featurePath, "receipts") : undefined
       }
     };
@@ -1374,8 +1106,6 @@ export class FilesystemStonvikRepository {
 
   private renderInbox(item: InboxItem): string {
     const fm: Record<string, unknown> = { id: item.id, source: item.source, created: item.created, status: item.status };
-    if (item.definitionRef) fm.definitionRef = item.definitionRef;
-    if (item.definitionKind) fm.definitionKind = item.definitionKind;
     if (item.featureRef) fm.featureRef = item.featureRef;
     if (item.clarification) fm.clarification = item.clarification;
     if (item.classification) fm.classification = item.classification;
@@ -1383,50 +1113,31 @@ export class FilesystemStonvikRepository {
     return `---\n${YAML.stringify(fm)}---\n\n# ${item.title}\n${item.body ? `\n${item.body}\n` : ""}`;
   }
 
-  private renderDefinitionTemplate(item: InboxItem, kind: "spec" | "adr"): string {
-    return `---\n${YAML.stringify({
-      stonvik: {
-        schemaVersion: 1,
-        source: { type: "inbox", ref: item.id },
-        title: item.title,
-        goal: "",
-        acceptance: [],
-        constraints: [],
-        verification: { commands: [], requiredEvidence: [] },
-      },
-    })}---\n\n# ${kind === "spec" ? "Technical Spec" : "Architecture Decision"} — ${item.title}\n\n## Context\n\n${item.body ?? item.title}\n\n## Decisions\n\n${kind === "spec" ? "## Implementation slices\n" : "## Consequences\n"}`;
+  private async validateDefinitionReferences(definitions: DefinitionRef[] | undefined): Promise<void> {
+    const repositoryRoot = await fs.realpath(this.root);
+    for (const definition of definitions ?? []) {
+      const resolved = path.resolve(this.root, definition.path);
+      const relative = path.relative(this.root, resolved);
+      if (!isSafeRepositoryPath(definition.path) || !isWithin(this.root, resolved) || relative.startsWith(".stonvik") || relative === "product/inbox" || relative.startsWith(`product${path.sep}inbox${path.sep}`) || relative === "features" || relative.startsWith(`features${path.sep}`)) {
+        throw new InvalidManifestError(`Definition path must point to a user-owned repository file: ${definition.path}`);
+      }
+      const stat = await fs.lstat(resolved).catch(() => undefined);
+      if (!stat) throw new InvalidManifestError(`Definition file does not exist: ${definition.path}`);
+      if (!stat.isFile() || stat.isSymbolicLink() || !(await this.hasNoSymlinkSegments(resolved))) throw new InvalidManifestError(`Definition file must be a regular file: ${definition.path}`);
+      const realPath = await fs.realpath(resolved).catch(() => undefined);
+      if (!realPath || !isWithin(repositoryRoot, realPath)) throw new InvalidManifestError(`Definition path must resolve inside the repository: ${definition.path}`);
+    }
   }
 
-  private async readDefinitionWorkDefinition(definitionPath: string, item: InboxItem): Promise<Omit<CreateFeatureInput, "source">> {
-    const raw = await fs.readFile(definitionPath, "utf8");
-    const match = raw.match(/^---\n([\s\S]*?)\n---\n?[\s\S]*$/);
-    if (!match) throw new InvalidInboxItemError(`Definition is missing frontmatter: ${item.definitionRef}`);
-    const parsed = YAML.parse(match[1]!) as { stonvik?: Partial<CreateFeatureInput> & { schemaVersion?: number; source?: { type?: string; ref?: string } } };
-    const definition = parsed.stonvik;
-    if (!definition || definition.schemaVersion !== 1 || definition.source?.type !== "inbox" || definition.source.ref !== item.id) {
-      throw new InvalidInboxItemError(`Definition does not reference Inbox item: ${item.id}`);
+  private async hasNoSymlinkSegments(filePath: string): Promise<boolean> {
+    let current = this.root;
+    for (const segment of path.relative(this.root, filePath).split(path.sep)) {
+      if (!segment) continue;
+      current = path.join(current, segment);
+      const stat = await fs.lstat(current).catch(() => undefined);
+      if (!stat || stat.isSymbolicLink()) return false;
     }
-    if (typeof definition.title !== "string" || typeof definition.goal !== "string" || !Array.isArray(definition.acceptance) || !definition.verification) {
-      throw new InvalidInboxItemError(`Definition has an incomplete Work definition: ${item.definitionRef}`);
-    }
-    const document = DefinitionDocumentSchema.safeParse({
-      schemaVersion: 1,
-      inboxRef: item.id,
-      kind: item.definitionKind,
-      title: definition.title,
-      goal: definition.goal,
-      acceptance: definition.acceptance,
-      verification: definition.verification,
-    });
-    if (!document.success) throw new InvalidInboxItemError(`Definition has an invalid Work contract: ${document.error.message}`);
-    return {
-      title: definition.title,
-      goal: definition.goal,
-      acceptance: definition.acceptance,
-      constraints: definition.constraints,
-      verification: definition.verification,
-      slug: definition.slug,
-    };
+    return true;
   }
 
   private async ensureGitignoreRuntime(): Promise<void> {
@@ -1493,23 +1204,6 @@ function redactOutput(output: string): string {
     .replace(/(authorization\s*:\s*|bearer\s+|token\s*=\s*|password\s*=\s*)[^\s,;]+/gi, "$1[REDACTED]")
     .trim();
   return redacted.length > MAX_OUTPUT_SUMMARY_LENGTH ? `${redacted.slice(0, MAX_OUTPUT_SUMMARY_LENGTH)}…` : redacted;
-}
-
-function directVerificationPolicy(paths: string[]): { commands: Array<{ name: string; run: string }> } {
-  const commands = paths.map((repositoryPath) => ({
-    name: `verify ${repositoryPath} exists`,
-    run: `test -f ${shellQuote(repositoryPath)}`,
-  }));
-  return { commands: commands.length ? commands : [{ name: "verify completion", run: "true" }] };
-}
-
-function extractRepositoryPaths(text: string): string[] {
-  return [...new Set(text.match(/\b(?:[\w.-]+\/)*[\w-]+\.[A-Za-z0-9]{1,12}\b/g) ?? [])]
-    .filter((value) => !value.startsWith("http") && !value.includes("://") && isSafeRepositoryPath(value));
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function stableJson(value: unknown): string {

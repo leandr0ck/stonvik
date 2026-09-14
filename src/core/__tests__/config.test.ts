@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { loadStonvikConfig, resolvePiCommand, buildModelArgs } from "../../core/services/config.js";
+import { loadStonvikConfig, resolvePiCommand, buildModelArgs } from "../../integrations/pi/config.js";
 
 describe("loadStonvikConfig", () => {
   let root: string;

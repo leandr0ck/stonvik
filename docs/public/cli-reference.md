@@ -7,107 +7,100 @@ Todos los comandos aceptan las opciones globales:
 --json          salida estructurada en stdout y errores estructurados en stderr
 ```
 
-Cuando no se pasa `--root`, Stonvik intenta descubrir la raíz Git desde el directorio actual y, si no hay Git, usa el directorio actual.
+Sin `--root`, Stonvik descubre la raíz Git o usa el directorio actual si no hay Git.
 
 ## Inicialización y consulta
 
 | Comando | Resultado |
 | --- | --- |
-| `stonvik init` | Crea la estructura de Stonvik y protege `.stonvik/runtime/` en `.gitignore`. |
-| `stonvik capture [text...]` | Crea un Inbox item. También puede leer texto desde stdin. |
-| `stonvik inbox` | Lista Inbox items y su estado. `stonvik inbox list` es un alias explícito. |
-| `stonvik next` | Devuelve el Work `ready` más antiguo, sin reclamarlo. |
+| `stonvik init` | Crea Inbox, estados de Work, eventos y runtime; agrega `.stonvik/runtime/` a `.gitignore`. |
+| `stonvik capture [text...]` | Guarda intención cruda en Inbox. También lee stdin. |
+| `stonvik inbox` / `stonvik inbox list` | Lista Inbox items. |
+| `stonvik inbox show <inbox-id>` | Muestra una intención. |
+| `stonvik inbox answer <inbox-id> <answer...>` | Responde una aclaración pendiente. |
+| `stonvik inbox review` | Lista items que requieren atención. |
+| `stonvik inbox restore <inbox-id>` | Devuelve un item de review a Inbox. |
 | `stonvik status` | Resume Inbox y Work por estado. |
-| `stonvik validate` | Valida configuración core, Inbox, manifests, receipts, provenance y referencias. |
+| `stonvik validate` | Valida configuración, schemas, referencias y evidencia. |
 
-## Preparación y handoff
+## Triage y definición
 
 ```text
-stonvik prepare <inbox-id> --route <direct|spec-first> --actor <type:name>
-stonvik handoff <work-id> --format <json|markdown>
+stonvik triage <inbox-id> --route <direct|spec|adr> --actor <type:name>
+stonvik define <inbox-id> --goal <goal> --acceptance <criterion...>
 ```
 
-Opciones de `prepare`:
+Opciones repetibles de `triage`:
 
-- `--actor <type:name>`: actor que decide la ruta; también se puede usar `STONVIK_ACTOR`.
-- `--role <role>`: `triager`, `implementer`, `specifier`, `verifier`, `reviewer` o `product-owner`.
-- `--size <XS|S|M|L|XL>`: señal declarada.
-- `--touched-files <count>`: cantidad estimada de archivos.
-- `--risk <risk>`: riesgo declarado; se puede repetir.
-- `--rationale <text>`: justificación; se puede repetir.
+- `--risk <risk>`
+- `--rationale <text>`
 
-La política inicial limita Work directo a `S` y hasta tres archivos, y exige spec-first para riesgos como `public_api`, `persistence`, `security`, `external_integration` y `multi_package`. La excepción corresponde al rol configurado, por defecto `product-owner`, y queda en `decidedBy` y `rationale`.
+También admite `--size <XS|S|M|L|XL>` y `--touched-files <count>`. El actor puede venir de `--actor` o `STONVIK_ACTOR`; `--role` cambia el rol declarado y por defecto es `triager`.
 
-## Ciclo de ejecución externo
+Opciones de `define`:
+
+- `--title <title>` y `--slug <slug>`;
+- `--constraint <text>`;
+- `--spec <path>` y `--adr <path>` para registrar documentos existentes; ambas son repetibles;
+- `--verify-command <command>`;
+- `--manual-evidence <criterion:kind>`.
+
+`define` crea un Work en `features/ready/`. Requiere al menos un comando de verificación o una evidencia manual. Las rutas de spec/ADR deben ser archivos existentes, relativas y fuera de `.stonvik/`, `product/inbox/` y `features/`.
+
+## Implementación externa y gates
 
 ```text
+stonvik next
 stonvik work start <work-id> --actor <type:name> [--run-id <id>]
-stonvik work claim <work-id>
-stonvik handoff <work-id> --format json
+stonvik work handoff <work-id> --format <json|markdown>
 stonvik work report <work-id> --receipt <path> [--run-id <id>]
 stonvik verify <work-id>
 stonvik work review <work-id> --actor <type:name> --decision <decision>
+stonvik ship <work-id>
 ```
 
 ### `work start`
 
-Acepta Work `ready` o Work `doing` sin claim. Crea un claim en `.stonvik/runtime/claims/`, registra un receipt de inicio y mueve `ready → doing`.
-
-### `work claim`
-
-Solo inspecciona el claim actual. No lo crea ni lo libera.
-
-### `work recover`
-
-```text
-stonvik work recover <work-id> --actor <type:name> [--run-id <id>]
-```
-
-Recupera un Work `doing` cuando el proceso del claim anterior ya no existe. No se debe borrar el archivo de claim manualmente.
+Reclama Work `ready` y lo mueve a `doing`. Crea un claim efímero en `.stonvik/runtime/claims/` y un receipt de ejecución inicial. Un Work `doing` puede reclamarse de nuevo solo después de una recuperación explícita.
 
 ### `work report`
 
-Lee JSON o YAML, valida el contrato y registra un receipt de ejecución:
+Lee un reporte JSON o YAML validado por `ExternalExecutionReport`:
 
-- `completed`: permanece en `doing`; permite `verify`.
-- `blocked`: mueve el Work a `blocked` y crea un handoff durable.
-- `needs_human`: permanece pendiente y crea un handoff durable.
-- `cancelled`: registra el resultado y la siguiente acción para recuperar o reiniciar.
+- `completed`: deja el Work en `doing` y habilita `verify`;
+- `blocked`: mueve el Work a `blocked` y registra un handoff;
+- `needs_human`: deja el Work pendiente y registra un handoff;
+- `cancelled`: registra el resultado y una siguiente acción.
 
-Si existe un claim, el actor del reporte debe coincidir con el actor reclamante.
+Si existe un claim, el actor y, cuando se indica, el `runId` deben coincidir.
 
 ### `verify`
 
-Ejecuta los comandos de verificación desde la raíz del repositorio. Un resultado `passed` mueve `doing → review`; cualquier otro resultado deja el Work fuera de `done`.
+Ejecuta desde la raíz del repositorio los comandos de `manifest.yaml`. Un resultado `passed` mueve `doing → review`; cualquier otro resultado deja el Work fuera de `done`.
 
-### `work review`
+### `work review` y `ship`
 
 Decisiones válidas: `approved`, `changes_requested`, `blocked` y `needs_human`.
 
-- `approved`: `review → done`.
-- `changes_requested`: `review → doing`.
-- `blocked`: `review → blocked`.
+- `approved`: registra aprobación, pero mantiene el Work en `review`;
+- `changes_requested`: mueve `review → doing`;
+- `blocked`: mueve `review → blocked`;
 - `needs_human`: permanece en `review`.
 
-El reviewer debe ser distinto del actor del último reporte de ejecución y debe existir una verificación actual aprobada.
+El reviewer debe ser distinto del último implementador y debe existir una verificación actual aprobada. `ship` exige esa aprobación, una ejecución completada y una verificación posterior a la ejecución; entonces mueve `review → done`.
 
-## Creación manual
-
-```text
-stonvik work create \
-  --title <title> \
-  --goal <goal> \
-  --acceptance <criterion...> \
-  --verify-command <command>
-```
-
-También admite `--constraint`, `--manual-evidence`, `--slug` y `--kind`. Un Work `specification` exige `--spec-file` y un gate de review; la CLI configura ese gate automáticamente.
+## Operaciones directas de Work
 
 ```text
-stonvik work create-from-spec <spec-work-id>
-stonvik work unblock <work-id>
+stonvik work create --title <title> --goal <goal> --acceptance <criterion...>
+stonvik work show <work-id>
 stonvik work list [--state <ready|doing|review|blocked|done>]
+stonvik work claim <work-id>
+stonvik work recover <work-id> --actor <type:name> [--run-id <id>]
+stonvik work unblock <work-id>
 ```
+
+`work create` acepta las mismas opciones de restricciones, referencias y verificación que `define`. Es la entrada para Work que no proviene de Inbox.
 
 ## Errores y exit codes
 
@@ -122,13 +115,9 @@ Con `--json`, un error de dominio tiene esta forma en `stderr`:
 }
 ```
 
-- `0`: operación exitosa.
-- `2`: contrato, opción, configuración o validación inválida.
-- `3`: repositorio no inicializado, Work inexistente, conflicto de estado, claim ocupado u otro conflicto recuperable.
-- `1`: error inesperado no clasificado.
+- `0`: operación exitosa;
+- `2`: contrato, opción, configuración o validación inválida;
+- `3`: repositorio no inicializado, Work inexistente, conflicto de estado o claim ocupado;
+- `1`: error inesperado.
 
-Los consumidores automatizados deben usar `code`, no parsear mensajes humanos.
-
-## Rutas de compatibilidad
-
-`run`, `triage`, `implement --engine pi-spec-flow`, `review` y `work-review` se mantienen para migración. Las integraciones nuevas deben usar el ciclo neutral.
+Los consumidores automatizados deben usar `error.code`, no parsear mensajes humanos.

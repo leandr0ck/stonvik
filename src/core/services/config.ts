@@ -7,10 +7,7 @@ export type CoreConfig = CoreConfigPayload;
 
 const CONFIG_FILENAME = "stonvik.json";
 
-/**
- * Load only core-owned configuration. Historical agent-specific keys are
- * ignored rather than exposed to core services.
- */
+/** Load only the configuration owned by the workflow core. */
 export async function loadCoreConfig(root: string): Promise<CoreConfig | undefined> {
   const configPath = path.join(root, CONFIG_FILENAME);
   try {
@@ -23,7 +20,3 @@ export async function loadCoreConfig(root: string): Promise<CoreConfig | undefin
     throw new ConfigInvalidError(String((error as Error).message ?? error));
   }
 }
-
-/** @deprecated Compatibility exports for consumers of the historical Pi path. */
-export { StonvikConfigSchema, loadStonvikConfig, resolvePiCommand, buildModelArgs } from "../../integrations/pi/config.js";
-export type { StonvikConfig } from "../../integrations/pi/config.js";

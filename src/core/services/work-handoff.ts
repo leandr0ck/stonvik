@@ -8,13 +8,12 @@ export function createWorkHandoff(feature: Feature, generated = new Date().toISO
     generated,
     work: {
       id: feature.id,
-      kind: manifest.kind ?? "implementation",
       title: manifest.title,
       goal: manifest.goal,
       acceptance: [...manifest.acceptance],
       constraints: [...(manifest.constraints ?? [])],
       source: manifest.source,
-      specificationRef: manifest.specificationRef,
+      definitions: manifest.definitions,
     },
     execution: {
       allowedPaths: ["repository files required by the Work; never product/, features/, or .stonvik/"],
@@ -23,6 +22,7 @@ export function createWorkHandoff(feature: Feature, generated = new Date().toISO
     protocol: {
       reportCommand: `stonvik work report ${feature.id} --receipt <path>`,
       requestReviewCommand: `stonvik work review ${feature.id} --actor <reviewer> --decision <decision>`,
+      shipCommand: `stonvik ship ${feature.id}`,
     },
   };
   return WorkHandoffSchema.parse(handoff) as WorkHandoff;
@@ -33,10 +33,9 @@ export function renderWorkHandoffMarkdown(handoff: WorkHandoff): string {
     `# Work handoff — ${handoff.work.title}`,
     "",
     `- **ID:** \`${handoff.work.id}\``,
-    `- **Kind:** \`${handoff.work.kind}\``,
     `- **Generated:** ${handoff.generated}`,
     ...(handoff.work.source ? [`- **Source:** ${handoff.work.source.type}:${handoff.work.source.ref}`] : []),
-    ...(handoff.work.specificationRef ? [`- **Specification:** \`${handoff.work.specificationRef}\``] : []),
+    ...(handoff.work.definitions?.length ? ["", "## Definitions", "", ...handoff.work.definitions.map((definition) => `- **${definition.kind}:** \`${definition.path}\``)] : []),
     "",
     "## Goal",
     "",
@@ -64,7 +63,9 @@ export function renderWorkHandoffMarkdown(handoff: WorkHandoff): string {
     "## Protocol",
     "",
     `1. Report the external result with \`${handoff.protocol.reportCommand}\`.`,
-    `2. Run \`stonvik verify ${handoff.work.id}\`, then request independent review with \`${handoff.protocol.requestReviewCommand}\`.`,
+    `2. Run \`stonvik verify ${handoff.work.id}\`.`,
+    `3. Request independent review with \`${handoff.protocol.requestReviewCommand}\`.`,
+    `4. Ship only after approval with \`${handoff.protocol.shipCommand}\`.`,
     "",
   ];
   return lines.join("\n");

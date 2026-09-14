@@ -10,8 +10,9 @@ intent, executable work, evidence, and decisions.
   plane is required; Git is optional and only helps discover a project root.
 - **Intent is not execution.** An Inbox stores raw requests. Only defined Work
   can be selected for implementation.
-- **Lifecycle is explicit.** Work moves through preparation, implementation,
-  verification, and review. An implementer never approves its own work.
+- **Lifecycle is explicit.** Work moves through triage, definition,
+  implementation, verification, review, and shipping. An implementer never
+  approves its own work.
 - **State and evidence travel together.** Durable artifacts belong in the
   repository; leases and process logs are local runtime details.
 - **Automation is bounded.** Deterministic code owns validation, ordering, and

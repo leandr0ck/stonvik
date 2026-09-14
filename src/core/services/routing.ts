@@ -79,7 +79,7 @@ export function validateRoutingDecision(value: unknown, policy: RoutingPolicy = 
   }
   const requiredRisk = decision.signals.risks.find((risk) => policy.requireSpecWhen.risks.includes(risk));
   if (requiredRisk && !authority) {
-    throw new RoutingPolicyViolationError(`Risk \`${requiredRisk}\` requires the spec-first route.`);
+    throw new RoutingPolicyViolationError(`Risk \`${requiredRisk}\` requires a spec or ADR route.`);
   }
   if (decision.signals.risks.includes("unknown_impact") && decision.decidedBy.role !== policy.ambiguity.requireRole) {
     throw new RoutingPolicyViolationError(`Ambiguous work requires actor role ${policy.ambiguity.requireRole}.`);

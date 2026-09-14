@@ -22,7 +22,7 @@ describe("execution adapters", () => {
 
     expect(result.outcome).toBe("completed");
     expect(result.feature.state).toBe("review");
-    expect(receipts.map((receipt) => receipt.kind)).toEqual(["execution", "verification"]);
+    expect(receipts.map((receipt) => receipt.kind)).toEqual(["execution", "execution", "verification"]);
   });
 
   it("maps a blocked adapter result to blocked with a handoff", async () => {
@@ -33,7 +33,7 @@ describe("execution adapters", () => {
     const result = await repo.executeFeature(feature.id, registry);
 
     expect(result.feature.state).toBe("blocked");
-    expect((await repo.listReceipts(feature.id)).map((receipt) => receipt.kind)).toEqual(["execution", "handoff"]);
+    expect((await repo.listReceipts(feature.id)).map((receipt) => receipt.kind)).toEqual(["execution", "execution", "handoff"]);
   });
 
   it("does not move a Feature when no adapter is available", async () => {
@@ -47,20 +47,20 @@ describe("execution adapters", () => {
     await expect(repo.listReceipts(feature.id)).resolves.toHaveLength(0);
   });
 
-  it("refreshes path-bound execution profiles after ready moves to doing", async () => {
-    const { repo } = await tempRepo();
-    const feature = await repo.createFeature({ title: "Spec Flow adapter", goal: "Keep paths valid after transition.", acceptance: ["The active spec path is used"], verification: { commands: [{ name: "pass", run: "true" }] } });
-    await fs.writeFile(path.join(feature.path, "spec.md"), "# Spec Flow\n");
-    await fs.mkdir(path.join(feature.path, "tickets"));
+  it("does not infer an execution adapter from document filenames", async () => {
+    const { root, repo } = await tempRepo();
+    const feature = await repo.createFeature({ title: "User-defined process", goal: "Keep implementation choices explicit.", acceptance: ["The chosen process is respected"], verification: { commands: [{ name: "pass", run: "true" }] } });
+    await fs.writeFile(path.join(root, "implementation.md"), "The team owns this format.\n");
+    await fs.mkdir(path.join(root, "tickets"));
 
     let seenRequest: ExecutionRequest | undefined;
     const adapter = {
-      id: "recording-spec-flow",
-      supports: (profile: ExecutionProfile) => profile.kind === "spec-flow",
+      id: "recording-direct",
+      supports: (profile: ExecutionProfile) => profile.kind === "direct",
       isAvailable: async () => true,
       execute: async (request: ExecutionRequest) => {
         seenRequest = request;
-        return { outcome: "completed" as const, summary: "Spec Flow completed." };
+        return { outcome: "completed" as const, summary: "Implementation completed." };
       },
     };
 
@@ -68,10 +68,6 @@ describe("execution adapters", () => {
 
     expect(result.feature.state).toBe("review");
     expect(seenRequest?.feature.state).toBe("doing");
-    expect(seenRequest?.profile.kind).toBe("spec-flow");
-    if (seenRequest?.profile.kind === "spec-flow") {
-      expect(seenRequest.profile.specPath).toContain(`${path.sep}features${path.sep}doing${path.sep}`);
-      expect(seenRequest.profile.ticketsPath).toContain(`${path.sep}features${path.sep}doing${path.sep}`);
-    }
+    expect(seenRequest?.profile).toEqual({ kind: "direct" });
   });
 });

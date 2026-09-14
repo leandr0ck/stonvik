@@ -14,102 +14,68 @@ async function tempRepo() {
 const triager: ActorRef = { type: "human", name: "lean", role: "triager" };
 const implementer: ActorRef = { type: "agent", name: "codex", role: "implementer" };
 const reviewer: ActorRef = { type: "human", name: "reviewer", role: "reviewer" };
-const productOwner: ActorRef = { type: "human", name: "owner", role: "product-owner" };
 
-function completedReport(actor: ActorRef = implementer): ExternalExecutionReport {
-  return {
-    schemaVersion: 1,
-    actor,
-    outcome: "completed",
-    summary: "The external actor completed the requested work.",
-    evidence: [],
-  };
+function completedReport(): ExternalExecutionReport {
+  return { schemaVersion: 1, actor: implementer, outcome: "completed", summary: "The external actor completed the requested work." };
 }
 
 describe("agent-agnostic workflow", () => {
-  it("runs a direct Work through external execution, verification, and independent review", async () => {
+  it("keeps triage, definition, execution, verification, review, and shipping independent", async () => {
     const { root, repo } = await tempRepo();
     const inbox = await repo.capture({ text: "Create report.md", source: "human:terminal" });
+    const triaged = await repo.triageInbox(inbox.id, { route: "direct", actor: triager });
+    expect(triaged.status).toBe("captured");
 
-    const prepared = await repo.prepareWork(inbox.id, { route: "direct", actor: triager });
-    expect(prepared.manifest.kind).toBe("implementation");
-    expect(prepared.manifest.routingDecision?.decidedBy).toMatchObject({ type: "human", name: "lean" });
+    const work = await repo.defineWorkFromInbox(inbox.id, {
+      title: inbox.title,
+      goal: "Create the report file.",
+      acceptance: ["report.md exists."],
+      verification: { commands: [{ name: "report-exists", run: "test -f report.md" }] },
+    });
+    expect(work.manifest.routingDecision?.decidedBy).toMatchObject({ type: "human", name: "lean" });
     expect(await repo.listInbox()).toEqual([]);
 
-    const started = await repo.startWork(prepared.id, implementer);
-    expect(started.state).toBe("doing");
-    await expect(repo.startWork(prepared.id, { type: "agent", name: "other", role: "implementer" })).rejects.toMatchObject({ code: "WORK_CLAIM_CONFLICT" });
-    const handoff = await repo.createWorkHandoff(prepared.id);
+    await repo.startWork(work.id, implementer);
+    await expect(repo.startWork(work.id, { type: "agent", name: "other", role: "implementer" })).rejects.toMatchObject({ code: "WORK_CLAIM_CONFLICT" });
+    const handoff = await repo.createWorkHandoff(work.id);
     expect(JSON.stringify(handoff)).not.toMatch(/pi|spec flow|model/i);
-    expect(handoff.work.kind).toBe("implementation");
+    expect(handoff.work.definitions).toBeUndefined();
+    expect(handoff.protocol.shipCommand).toBe(`stonvik ship ${work.id}`);
 
     await fs.writeFile(path.join(root, "report.md"), "ready\n");
-    await repo.recordExternalExecutionReport(prepared.id, completedReport());
-    expect((await repo.getFeature(prepared.id))?.state).toBe("doing");
-
-    const verification = await repo.verifyWork(prepared.id);
-    expect(verification.outcome).toBe("passed");
-    expect((await repo.getFeature(prepared.id))?.state).toBe("review");
-
-    const done = await repo.reviewWork(prepared.id, reviewer, "approved", "The implementation satisfies the contract.");
-    expect(done.state).toBe("done");
-    expect((await repo.listReceipts(prepared.id)).some((receipt) => receipt.kind === "review" && receipt.actor.name === "reviewer")).toBe(true);
-  });
-
-  it("rejects self-review and direct routing for risky work", async () => {
-    const { root, repo } = await tempRepo();
-    const inbox = await repo.capture({ text: "Change the public API authentication persistence layer" });
-
-    await expect(repo.prepareWork(inbox.id, { route: "direct", actor: triager })).rejects.toMatchObject({ code: "ROUTING_POLICY_VIOLATION" });
-    const approvedException = await repo.prepareWork(inbox.id, { route: "direct", actor: productOwner });
-    expect(approvedException.manifest.routingDecision?.decidedBy.role).toBe("product-owner");
-
-    const safeInbox = await repo.capture({ text: "Create notes.md" });
-    const work = await repo.prepareWork(safeInbox.id, { route: "direct", actor: triager });
-    await repo.startWork(work.id, implementer);
-    await fs.writeFile(path.join(root, "notes.md"), "ready\n");
     await repo.recordExternalExecutionReport(work.id, completedReport());
-    await repo.verifyWork(work.id);
+    const verification = await repo.verifyWork(work.id);
+    expect(verification.outcome).toBe("passed");
+    expect((await repo.getFeature(work.id))?.state).toBe("review");
 
-    await expect(repo.reviewWork(work.id, implementer, "approved", "I approve my own work.")).rejects.toMatchObject({ code: "REVIEW_SELF_APPROVAL" });
+    const reviewed = await repo.reviewWork(work.id, reviewer, "approved", "The implementation satisfies the contract.");
+    expect(reviewed.state).toBe("review");
+    const shipped = await repo.shipWork(work.id);
+    expect(shipped.state).toBe("done");
   });
 
-  it("supports spec-first Work and creates implementation from an approved specification", async () => {
+  it("requires a matching user-owned definition for spec and ADR triage", async () => {
     const { root, repo } = await tempRepo();
-    const inbox = await repo.capture({ text: "Add CSV export" });
-    const specification = await repo.prepareWork(inbox.id, { route: "spec-first", actor: triager });
+    const inbox = await repo.capture({ text: "Change the public API authentication layer" });
+    await repo.triageInbox(inbox.id, { route: "spec", actor: triager });
 
-    expect(specification.manifest.kind).toBe("specification");
-    expect(specification.artifacts.spec).toBeDefined();
-    await repo.startWork(specification.id, { type: "agent", name: "specifier", role: "specifier" });
-    await fs.writeFile(path.join((await repo.getFeature(specification.id))!.path, "spec.md"), [
-      "# Add CSV export",
-      "",
-      "## Problem",
-      "Users need portable report data.",
-      "",
-      "## Scope",
-      "Export the current report as CSV.",
-      "",
-      "## Acceptance",
-      "- A CSV export is available.",
-      "",
-      "## Constraints",
-      "- Preserve existing report behavior.",
-      "",
-      "## Verification",
-      "- `true`",
-      "",
-    ].join("\n"));
-    await repo.recordExternalExecutionReport(specification.id, completedReport({ type: "agent", name: "specifier", role: "specifier" }));
-    await repo.verifyWork(specification.id);
-    await repo.reviewWork(specification.id, reviewer, "approved", "The specification is complete.");
+    await expect(repo.defineWorkFromInbox(inbox.id, {
+      title: inbox.title,
+      goal: "Implement the approved change.",
+      acceptance: ["The approved behavior is implemented."],
+      verification: { commands: [{ name: "pass", run: "true" }] },
+    })).rejects.toThrow("requires a matching user-owned definition");
 
-    const implementation = await repo.createImplementationFromSpecification(specification.id);
-    expect(implementation.state).toBe("ready");
-    expect(implementation.manifest.kind).toBe("implementation");
-    expect(implementation.manifest.specificationRef).toBe(specification.id);
-    expect(implementation.artifacts.spec).toBeUndefined();
-    await expect(fs.stat(path.join(root, "features", "done", path.basename(specification.path), "spec.md"))).resolves.toBeTruthy();
+    const document = path.join(root, "design", "api.md");
+    await fs.mkdir(path.dirname(document), { recursive: true });
+    await fs.writeFile(document, "The team defines this format, not Stonvik.\n");
+    const work = await repo.defineWorkFromInbox(inbox.id, {
+      title: inbox.title,
+      goal: "Implement the approved change.",
+      acceptance: ["The approved behavior is implemented."],
+      definitions: [{ kind: "spec", path: "design/api.md" }],
+      verification: { commands: [{ name: "pass", run: "true" }] },
+    });
+    expect(work.manifest.definitions).toEqual([{ kind: "spec", path: "design/api.md" }]);
   });
 });

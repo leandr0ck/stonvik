@@ -21,19 +21,26 @@ describe("verification receipts and review", () => {
       acceptance: ["Checks are recorded"],
       verification: { commands: [{ name: "pass", run: `${process.execPath} -e "process.stdout.write('ok')"` }] }
     });
-    await repo.startFeature(feature.id);
+    await repo.startWork(feature.id, { type: "agent", name: "builder", role: "implementer" });
+    await repo.recordExternalExecutionReport(feature.id, {
+      schemaVersion: 1,
+      actor: { type: "agent", name: "builder", role: "implementer" },
+      outcome: "completed",
+      summary: "Implementation completed.",
+    });
 
-    const verification = await repo.verifyFeature(feature.id);
+    const verification = await repo.verifyWork(feature.id);
 
     expect(verification.outcome).toBe("passed");
     expect((await repo.getFeature(feature.id))?.state).toBe("review");
-    await expect(repo.completeFeature(feature.id)).rejects.toMatchObject({ code: "REVIEW_RECEIPT_REQUIRED" });
+    await expect(repo.shipWork(feature.id)).rejects.toMatchObject({ code: "REVIEW_RECEIPT_REQUIRED" });
 
-    const done = await repo.reviewFeature(feature.id, "approved", "Checks passed and acceptance reviewed.");
+    const reviewed = await repo.reviewWork(feature.id, { type: "human", name: "reviewer", role: "reviewer" }, "approved", "Checks passed and acceptance reviewed.");
+    const done = await repo.shipWork(reviewed.id);
     const receipts = await repo.listReceipts(done.id);
 
     expect(done.state).toBe("done");
-    expect(receipts.map((receipt) => receipt.kind)).toEqual(["verification", "review"]);
+    expect(receipts.map((receipt) => receipt.kind)).toEqual(["execution", "execution", "verification", "review"]);
   });
 
   it("keeps a Feature doing and records a handoff when verification fails", async () => {
@@ -44,28 +51,34 @@ describe("verification receipts and review", () => {
       acceptance: ["The failure is durable"],
       verification: { commands: [{ name: "fail", run: `${process.execPath} -e "process.exit(2)"` }] }
     });
-    await repo.startFeature(feature.id);
+    await repo.startWork(feature.id, { type: "agent", name: "builder", role: "implementer" });
 
     const verification = await repo.verifyFeature(feature.id);
     const receipts = await repo.listReceipts(feature.id);
 
     expect(verification.outcome).toBe("failed");
     expect((await repo.getFeature(feature.id))?.state).toBe("doing");
-    expect(receipts.map((receipt) => receipt.kind)).toEqual(["verification", "handoff"]);
+    expect(receipts.map((receipt) => receipt.kind)).toEqual(["execution", "verification", "handoff"]);
   });
 
   it("moves review back to doing when changes are requested", async () => {
     const { repo } = await tempRepo();
     const feature = await repo.createFeature({ title: "Review me", goal: "Review the change.", acceptance: ["A reviewer decides"], verification: { commands: [{ name: "pass", run: "true" }] } });
-    await repo.startFeature(feature.id);
-    await repo.submitForReview(feature.id);
+    await repo.startWork(feature.id, { type: "agent", name: "builder", role: "implementer" });
+    await repo.recordExternalExecutionReport(feature.id, {
+      schemaVersion: 1,
+      actor: { type: "agent", name: "builder", role: "implementer" },
+      outcome: "completed",
+      summary: "Implementation completed.",
+    });
+    await repo.verifyWork(feature.id);
 
-    const result = await repo.reviewFeature(feature.id, "changes_requested", "Add missing coverage.");
+    const result = await repo.reviewWork(feature.id, { type: "human", name: "reviewer", role: "reviewer" }, "changes_requested", "Add missing coverage.");
 
     expect(result.state).toBe("doing");
-    await expect(repo.listReceipts(feature.id)).resolves.toMatchObject([
+    await expect(repo.listReceipts(feature.id)).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "review", outcome: "changes_requested" })
-    ]);
+    ]));
   });
 
   it("reports receipts with broken local references during validation", async () => {
