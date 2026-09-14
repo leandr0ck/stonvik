@@ -15,7 +15,7 @@ Cuando no se pasa `--root`, Stonvik intenta descubrir la raíz Git desde el dire
 | --- | --- |
 | `stonvik init` | Crea la estructura de Stonvik y protege `.stonvik/runtime/` en `.gitignore`. |
 | `stonvik capture [text...]` | Crea un Inbox item. También puede leer texto desde stdin. |
-| `stonvik inbox` | Lista Inbox items y su estado. |
+| `stonvik inbox` | Lista Inbox items y su estado. `stonvik inbox list` es un alias explícito. |
 | `stonvik next` | Devuelve el Work `ready` más antiguo, sin reclamarlo. |
 | `stonvik status` | Resume Inbox y Work por estado. |
 | `stonvik validate` | Valida configuración core, Inbox, manifests, receipts, provenance y referencias. |

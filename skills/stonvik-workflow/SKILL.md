@@ -1,6 +1,6 @@
 ---
 name: stonvik-workflow
-description: Use when an agent works in a Stonvik repository or a user asks it to capture/capturar intent, prepare/preparar Work, select or implement a Work item, create a handoff, report external execution, or coordinate verification and review through the Stonvik CLI. Do not use for unrelated repositories or for changing Stonvik itself.
+description: Use when an agent works in a Stonvik repository or a user asks it to capture/capturar intent, list/listar Inbox items, prepare/preparar Work, select or implement a Work item, create a handoff, report external execution, or coordinate verification and review through the Stonvik CLI. Do not use for unrelated repositories or for changing Stonvik itself.
 ---
 
 # Stonvik workflow
@@ -16,6 +16,8 @@ Participate through the `stonvik` CLI. Prefer the installed package binary (`sto
 Do not edit Stonvik state files to advance a workflow. The CLI owns claims, transitions, receipts, verification, and review gates.
 
 Do not assume a Work is available because someone mentioned it in a prompt. Select it with `stonvik next --json` or use the explicit Work ID supplied by the repository.
+
+To inspect Inbox items, use the canonical command `stonvik --json inbox`; `stonvik inbox list` is an explicit compatibility alias. Do not invent a different list command or summarize an item's title as if it were the stored intent.
 
 ## Before editing
 

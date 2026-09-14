@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.3] - 2026-09-13
+
+### Added
+
+- Added the explicit `stonvik inbox list` alias for agents and operators who prefer a verb-noun listing command.
+
+### Fixed
+
+- The Agent Skill now triggers for Inbox listing requests and identifies `stonvik --json inbox` as the canonical command.
+
 ## [1.1.2] - 2026-09-13
 
 ### Fixed

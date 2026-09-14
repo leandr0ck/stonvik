@@ -90,11 +90,8 @@ program.command("verify <id>")
   });
 
 const inbox = program.command("inbox").description("List Inbox items");
-inbox.action(async () => {
-  const repo = await repoForCommand();
-  const items = await repo.listInbox();
-  output(items, items.length ? items.map((i) => `${i.id}\t${i.status}\t${i.created}\t${i.title}`).join("\n") : "Inbox is empty");
-});
+inbox.action(listInboxCommand);
+inbox.command("list").description("List Inbox items (explicit alias)").action(listInboxCommand);
 inbox.command("answer <inboxId> <answer...>")
   .description("Answer a pending direct clarification")
   .action(async (inboxId: string, answer: string[]) => {
@@ -400,6 +397,12 @@ program.parseAsync(process.argv).catch((error) => {
   console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   process.exit(1);
 });
+
+async function listInboxCommand(): Promise<void> {
+  const repo = await repoForCommand();
+  const items = await repo.listInbox();
+  output(items, items.length ? items.map((i) => `${i.id}\t${i.status}\t${i.created}\t${i.title}`).join("\n") : "Inbox is empty");
+}
 
 async function repoForCommand(): Promise<FilesystemStonvikRepository> {
   const opts = program.opts<GlobalOptions>();
