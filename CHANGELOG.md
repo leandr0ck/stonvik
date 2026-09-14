@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.4] - 2026-09-13
+
+### Changed
+
+- The Agent Skill now includes a compact CLI API reference with canonical commands and lifecycle effects.
+
 ## [1.1.3] - 2026-09-13
 
 ### Added

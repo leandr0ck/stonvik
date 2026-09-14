@@ -19,6 +19,43 @@ Do not assume a Work is available because someone mentioned it in a prompt. Sele
 
 To inspect Inbox items, use the canonical command `stonvik --json inbox`; `stonvik inbox list` is an explicit compatibility alias. Do not invent a different list command or summarize an item's title as if it were the stored intent.
 
+## CLI quick reference
+
+Resolve the CLI once before using it:
+
+```bash
+if command -v stonvik >/dev/null 2>&1; then
+  CLI=stonvik
+elif [ -x ./node_modules/.bin/stonvik ]; then
+  CLI=./node_modules/.bin/stonvik
+else
+  echo "Stonvik CLI is not installed in the target repository" >&2
+  exit 1
+fi
+```
+
+Use `--json` for machine-readable output and put it before the command. These are the canonical operations:
+
+| Purpose | Command | Important result |
+| --- | --- | --- |
+| Initialize | `$CLI init` | Creates the repository layout. |
+| Capture literal intent | `$CLI --json capture "<text>" --source <type:name>` | Creates Inbox; does not create Work. |
+| List Inbox | `$CLI --json inbox` | Reads raw Inbox items. `$CLI --json inbox list` is an explicit alias. |
+| List attention items | `$CLI --json inbox review` | Reads Inbox items needing human attention. |
+| Prepare | `$CLI prepare <inbox-id> --route <direct|spec-first> --actor <type:name>` | Creates Work in `ready`. |
+| Select | `$CLI --json next` | Selects the oldest `ready` Work without claiming it. |
+| Claim | `$CLI work start <work-id> --actor <type:name> [--run-id <id>]` | Claims Work and moves `ready → doing`. |
+| Inspect claim | `$CLI --json work claim <work-id>` | Reads the local claim; does not recover it. |
+| Handoff | `$CLI handoff <work-id> --format <json|markdown>` | Produces context without changing state. |
+| Report | `$CLI work report <work-id> --receipt <path> [--run-id <id>]` | Imports an external execution result. |
+| Verify | `$CLI verify <work-id>` | Passing checks move `doing → review`; never directly to `done`. |
+| Review | `$CLI work review <work-id> --actor <type:name> --decision <decision>` | Only an independent approval moves `review → done`. |
+| Recover | `$CLI work recover <work-id> --actor <type:name>` | Reclaims Work only after the old process is gone. |
+| Unblock | `$CLI work unblock <work-id>` | Moves `blocked → ready`. |
+| Validate | `$CLI --json validate` | Checks repository contracts and references. |
+
+Do not replace these commands with `mv`, `cp`, direct manifest edits, or direct receipt edits. For complete options and schemas, consult `docs/public/cli-reference.md` and `docs/public/contracts.md`.
+
 ## Before editing
 
 1. Confirm the repository root. Run commands from the target repository, not from the repository that contains the Stonvik source. Pass `--root <path>` when the current directory is not the repository root.
