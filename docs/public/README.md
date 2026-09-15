@@ -12,6 +12,17 @@ npx stonvik init
 npx stonvik --help
 ```
 
+Para instalar directamente desde Git con Bun, permite el script de build del
+paquete (Bun no ejecuta scripts de dependencias Git por defecto):
+
+```bash
+bun add --trust github:leandr0ck/stonvik
+# o, si ya está declarado en package.json:
+bun pm trust stonvik && bun install
+```
+
+El paquete ejecuta `prepare` para compilar `dist/` durante la instalación Git.
+
 ## Flujo
 
 ```text
