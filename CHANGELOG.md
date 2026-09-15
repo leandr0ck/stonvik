@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.6] - 2026-09-15
+
+### Changed
+
+- Added explicit Agent Skill and integration guidance for linking existing Specs to Inbox items, including missing-field handling and Work-state boundaries.
+
 ## [1.1.5] - 2026-09-15
 
 ### Changed

@@ -48,6 +48,7 @@ Do not run extra queries unless they are needed to satisfy the request.
 | show an Inbox item | `$CLI --json inbox show <inbox-id>` |
 | capture/add a request | `$CLI --json capture "<literal user text>" --source agent:<name>` |
 | answer a pending clarification | `$CLI --json inbox answer <inbox-id> "<literal answer>"` |
+| link/associate/attach a Spec to an Inbox item | Follow the Spec-linking procedure below |
 | validate Stonvik state | `$CLI --json validate` |
 
 Important distinctions:
@@ -57,9 +58,30 @@ Important distinctions:
 - Capture preserves the user's text literally. Do not summarize, translate, expand, or silently choose a solution.
 - A capture request is complete after `capture`; do not triage or define it unless explicitly requested.
 
+## 3. Link a Spec to an Inbox item
+
+When the user says “link”, “associate”, “attach”, “enlaza”, “asocia”, or “vincula” a Spec to an Inbox item:
+
+1. Read the target item through `$CLI --json inbox show <inbox-id>`.
+2. Confirm the Spec path is an existing repository-relative file. Do not create or invent a Spec unless the user explicitly asks for that.
+3. If the item has no routing decision, run `$CLI --json triage <inbox-id> --route spec --actor <type:name>`.
+4. Run `define` with the Spec path and the required goal, acceptance, and verification fields:
+
+```bash
+$CLI --json define <inbox-id> \
+  --spec <spec-path> \
+  --goal "<goal>" \
+  --acceptance "<criterion>" \
+  --verify-command "<command>"
+```
+
+If goal, acceptance, or verification is missing, ask for only the missing values instead of guessing. A successful `define` creates ready Work in `features/ready/`; it does not start implementation.
+
+If the target is already a Work in `ready`, `doing`, `review`, `blocked`, or `done`, stop: the current CLI has no supported Work-definition linking command. Never attach the Spec by editing `manifest.yaml`; report that a CLI capability is required.
+
 After a successful command, summarize the returned JSON concisely. Include IDs and states needed for the next action. Do not expose the executable-resolution shell snippet in the response.
 
-## 3. Triage and define Work only when requested
+## 4. Triage and define Work only when requested
 
 Record a routing decision:
 
@@ -94,7 +116,7 @@ $CLI --json work create \
 
 Do not infer acceptance criteria, verification, scope, or architecture when the user has not supplied enough information. Ask only for the missing decision.
 
-## 4. Execute Work through the lifecycle
+## 5. Execute Work through the lifecycle
 
 When the user asks to implement the next or a specified Work:
 
@@ -115,7 +137,7 @@ Never change workflow state by editing or moving:
 
 Use the CLI for every transition. Modify only product/source artifacts required by the handoff.
 
-## 5. Report, verify, review, and ship
+## 6. Report, verify, review, and ship
 
 Create a repository-local JSON or YAML execution report and import it with the same actor and run ID used to claim Work:
 
@@ -155,7 +177,7 @@ An implementer must never approve its own execution. After an independent approv
 $CLI --json ship <work-id>
 ```
 
-## 6. Handle errors without improvising
+## 7. Handle errors without improvising
 
 With `--json`, branch on `error.code` and the process exit code. Never parse human-readable error prose.
 

@@ -28,6 +28,8 @@ Los comandos son exactos y permanecen en inglés (`capture`, `triage`, `define`,
 
 4. Leer las referencias `definitions` si el Work tiene spec o ADR. Esos archivos pertenecen al equipo y su formato es libre.
 
+Para enlazar una Spec solicitada por el usuario con un item de Inbox, el agente debe leer el item, comprobar que la ruta de la Spec existe, ejecutar `triage --route spec` si aún no tiene routing y luego ejecutar `define --spec` con objetivo, aceptación y verificación. Si faltan esos campos, debe pedirlos; no debe inventarlos. Si el item ya es Work, no debe editar `manifest.yaml`: el CLI actual no soporta enlazar definiciones a Work existente.
+
 5. Implementar con el proceso propio del agente. No modificar manifests, receipts, claims, `product/` ni `features/` para cambiar el workflow.
 
 6. Crear un reporte JSON y registrarlo:
