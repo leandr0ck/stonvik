@@ -1,25 +1,17 @@
 ---
 name: stonvik
-description: Use when an agent must capture, prepare, claim, implement, report, verify, review, recover, or inspect Work through the Stonvik CLI. Not for developing Stonvik itself.
+description: Operate repository tasks directly through the Stonvik CLI. Use for Spanish or English requests to list tasks or Inbox items, capture intent, inspect status, select or execute Work, report results, verify, review, ship, unblock, or recover work. Trigger on phrases such as "listar tareas", "qué sigue", "capturar", "agregar al inbox", "estado del trabajo", "start work", and explicit Stonvik requests. Not for developing Stonvik itself.
 ---
 
-# Stonvik
+# Stonvik CLI operator
 
-Treat the repository as the durable source of truth. Conversation context does not establish Work state: query Stonvik and read the current handoff before acting.
+Execute the Stonvik CLI immediately when the request maps to an operation below. Do not answer from memory, inspect workflow directories, or describe commands instead of running them.
 
-## Non-negotiable rules
+Repository state is authoritative. Conversation history is not.
 
-- Use the `stonvik` CLI for claims, transitions, receipts, verification, and review. Never advance workflow state with `mv`, `cp`, direct manifest edits, or direct receipt edits.
-- CLI commands remain in English. Use `capture`, not `capturar`; use `prepare`, not `preparar`.
-- Preserve captured intent literally. Do not turn “more visual charts” into “pie charts” unless the user chose that solution. Ask for clarification or use `spec-first` when scope is unclear.
-- Do not assume that a prompt creates executable Work. Use an explicit Work ID supplied for the target repository or select Work with `stonvik --json next`.
-- Claim Work and read its handoff before editing.
-- A completed implementation is neither verified nor approved. An implementer must not approve its own work.
-- When structured output is available, branch on `error.code` and the exit code; never parse human-readable error messages.
+## 1. Resolve the CLI once
 
-## Resolve the CLI
-
-Run from the target repository. Prefer its local binary so the skill and CLI versions stay aligned:
+Run commands from the target repository. Resolve the executable at the beginning of the operation:
 
 ```bash
 if [ -x ./node_modules/.bin/stonvik ]; then
@@ -32,150 +24,181 @@ else
 fi
 ```
 
-Do not use `npx stonvik` or `bunx stonvik` to guess an unavailable package. Do not execute a source checkout's `dist/cli/index.js` directly; if unavoidable, invoke it through Node rather than changing generated-file permissions.
+Do not use `npx`, `bunx`, a guessed package path, or a source checkout's generated `dist` file. When operating from another directory, add `--root <target-repository>` before the command.
 
-Pass `--root <path>` when the current directory is not the target repository root. Put global options before the command in examples and scripts.
-
-## When the CLI is unclear
-
-Do not guess commands, options, transitions, or recovery steps. Resolve uncertainty in this order:
-
-1. Read `error.code` and the exit code when available.
-2. Run `$CLI --help` or `$CLI <command> --help`.
-3. Consult `docs/public/cli-reference.md` or `docs/public/contracts.md` from the installed package.
-4. If the safe action remains unclear, stop and report `needs_human` when a report is valid for the current Work state.
-5. Never compensate for missing knowledge by editing Stonvik state files directly.
-
-CLI help is authoritative for command syntax; public contracts are authoritative for payload shape.
-
-## Operational flow
-
-### 1. Inspect or capture intent
-
-Use the canonical Inbox commands:
+Use `--json` for every command whose output the agent must interpret. Global options go before the command:
 
 ```bash
-$CLI --json inbox
-$CLI --json inbox review
-$CLI --json capture "<literal user text>" --source agent:<name>
+$CLI --root <target-repository> --json status
 ```
 
-`inbox list` is an explicit compatibility alias. Capture creates an Inbox item, not executable Work.
+## 2. Map user intent directly to commands
 
-Prepare an Inbox item only when routing responsibility is assigned:
+Do not run extra queries unless they are needed to satisfy the request.
+
+| User intent, in any language | Execute |
+| --- | --- |
+| list tasks, `listar tareas`, list Work | `$CLI --json work list` |
+| list ready tasks, `tareas listas` | `$CLI --json work list --state ready` |
+| what is next, `qué sigue`, next task | `$CLI --json next` |
+| workflow status, `estado` | `$CLI --json status` |
+| list Inbox, `listar inbox`, captured requests | `$CLI --json inbox` |
+| list Inbox review items | `$CLI --json inbox review` |
+| show a task/Work | `$CLI --json work show <work-id>` |
+| show an Inbox item | `$CLI --json inbox show <inbox-id>` |
+| capture/add a request | `$CLI --json capture "<literal user text>" --source agent:<name>` |
+| answer a pending clarification | `$CLI --json inbox answer <inbox-id> "<literal answer>"` |
+| validate Stonvik state | `$CLI --json validate` |
+
+Important distinctions:
+
+- **Inbox is raw intent, not executable Work.** `listar tareas` means `work list`; do not append Inbox results unless the user asks for Inbox or a combined overview.
+- `next` selects only the oldest ready Work and does not claim it.
+- Capture preserves the user's text literally. Do not summarize, translate, expand, or silently choose a solution.
+- A capture request is complete after `capture`; do not triage or define it unless explicitly requested.
+
+After a successful command, summarize the returned JSON concisely. Include IDs and states needed for the next action. Do not expose the executable-resolution shell snippet in the response.
+
+## 3. Triage and define Work only when requested
+
+Record a routing decision:
 
 ```bash
-$CLI prepare <inbox-id> \
-  --route <direct|spec-first> \
+$CLI --json triage <inbox-id> \
+  --route <direct|spec|adr> \
   --actor <type:name>
 ```
 
-Actor identity is declarative provenance, not authentication. Use the same identity consistently.
+Use `direct` only when the intent is sufficiently defined. Use `spec` or `adr` only when the corresponding user-owned document will be provided. Never invent a document merely to advance state.
 
-### 2. Identify, claim, and inspect Work
+Create executable Work from an Inbox item:
 
-Use the explicit Work ID supplied for the target repository or select the oldest ready Work:
+```bash
+$CLI --json define <inbox-id> \
+  --goal "<goal>" \
+  --acceptance "<criterion>" \
+  --verify-command "<command>"
+```
+
+Optional repeatable options include `--acceptance`, `--constraint`, `--spec`, `--adr`, `--verify-command`, and `--manual-evidence`. Read `$CLI define --help` before using an option not shown here.
+
+To create Work without Inbox provenance:
+
+```bash
+$CLI --json work create \
+  --title "<title>" \
+  --goal "<goal>" \
+  --acceptance "<criterion>" \
+  --verify-command "<command>"
+```
+
+Do not infer acceptance criteria, verification, scope, or architecture when the user has not supplied enough information. Ask only for the missing decision.
+
+## 4. Execute Work through the lifecycle
+
+When the user asks to implement the next or a specified Work:
 
 ```bash
 $CLI --json next
-$CLI work start <work-id> --actor <type:name> --run-id <run-id>
-$CLI handoff <work-id> --format json
+$CLI --json work start <work-id> --actor agent:<name> --run-id <run-id>
+$CLI --json work handoff <work-id> --format json
 ```
 
-`next` selects without claiming. `work start` claims Work and moves `ready → doing`.
+If the user supplied a Work ID, skip `next`. After `work start`, read the handoff before editing source files. Follow its goal, acceptance criteria, constraints, definitions, allowed paths, and verification policy.
 
-Follow the handoff's goal, acceptance criteria, constraints, allowed paths, and verification policy. Do not fill gaps from conversation context.
-
-If `work start` reports `WORK_CLAIM_CONFLICT`, stop and inspect the claim:
-
-```bash
-$CLI --json work claim <work-id>
-```
-
-Never delete or overwrite a claim.
-
-### 3. Implement only the requested change
-
-Modify only repository source artifacts required by the handoff. Do not modify workflow state under:
+Never change workflow state by editing or moving:
 
 - `product/inbox/`;
 - `features/ready/`, `features/doing/`, `features/review/`, `features/blocked/`, or `features/done/`;
 - `.stonvik/runtime/`;
 - manifests, receipts, claims, leases, or event streams.
 
-Check each acceptance criterion before reporting completion. Keep required verification artifacts at repository-relative paths.
+Use the CLI for every transition. Modify only product/source artifacts required by the handoff.
 
-### 4. Report the result
+## 5. Report, verify, review, and ship
 
-Create a versioned `ExternalExecutionReport`. A minimal valid report is:
+Create a repository-local JSON or YAML execution report and import it with the same actor and run ID used to claim Work:
 
 ```json
 {
   "schemaVersion": 1,
-  "actor": { "type": "agent", "name": "example", "role": "implementer" },
+  "actor": { "type": "agent", "name": "pi", "role": "implementer" },
   "outcome": "completed",
-  "summary": "Describe what changed and what remains to verify."
+  "summary": "Concise, verifiable implementation result."
 }
 ```
 
-Import it through the CLI:
-
 ```bash
-$CLI work report <work-id> --receipt result.json --run-id <run-id>
+$CLI --json work report <work-id> --receipt <report-path> --run-id <run-id>
 ```
 
-If a claim exists, the report actor and optional run ID must match it. Only list artifacts that exist, using repository-relative paths without `..`. Local evidence references follow the same rule; external URLs are allowed as evidence, not artifacts. Never put secrets in `summary` or `details`.
+Valid outcomes are `completed`, `blocked`, `needs_human`, and `cancelled`. Report honestly. `completed` means implementation ended; it does not mean verified, reviewed, or done.
 
-Choose the outcome honestly:
-
-- `completed`: execution finished; verification and review are still pending;
-- `blocked`: a dependency prevents continuation;
-- `needs_human`: a human decision or missing information is required;
-- `cancelled`: execution stopped before completion.
-
-### 5. Verify and request independent review
-
-When the handoff assigns verification responsibility, run:
+When the handoff assigns verification responsibility:
 
 ```bash
-$CLI verify <work-id>
+$CLI --json verify <work-id>
 ```
 
-Passing verification moves `doing → review`, never directly to `done`.
-
-A different declared actor may then review:
+Passing verification moves Work from `doing` to `review`. A different actor must review:
 
 ```bash
-$CLI work review <work-id> \
+$CLI --json work review <work-id> \
   --actor <reviewer-type:name> \
   --decision <approved|changes_requested|blocked|needs_human> \
   --summary "<review summary>"
 ```
 
-Only independent `approved` review moves `review → done`.
+An implementer must never approve its own execution. After an independent approval:
 
-## Failure and recovery
+```bash
+$CLI --json ship <work-id>
+```
 
-With `--json`, Stonvik writes structured domain errors to stderr. Exit code `2` means invalid input or contract; exit code `3` means missing state or a recoverable workflow conflict. Correct the input or state indicated by `error.code` instead of improvising filesystem changes.
+## 6. Handle errors without improvising
 
-Recover Work only after confirming that the previous claimant process no longer exists:
+With `--json`, branch on `error.code` and the process exit code. Never parse human-readable error prose.
+
+- Exit `2`: invalid input, option, contract, configuration, or validation.
+- Exit `3`: missing state or recoverable workflow conflict.
+- Exit `1`: unexpected failure.
+
+If syntax is unclear, inspect only the relevant help:
+
+```bash
+$CLI <command> --help
+```
+
+Do not run broad discovery before canonical commands already listed in this skill.
+
+For `WORK_CLAIM_CONFLICT`, stop and inspect the claim:
 
 ```bash
 $CLI --json work claim <work-id>
-$CLI work recover <work-id> --actor <type:name> --run-id <run-id>
 ```
 
-Use `$CLI work unblock <work-id>` only after resolving the blocker. Preserve existing claims and receipts.
+Recover only after confirming the previous actor process no longer exists:
 
-## Final check
+```bash
+$CLI --json work recover <work-id> --actor agent:<name> --run-id <new-run-id>
+```
 
-Before stopping, confirm that:
+Return blocked Work to ready only after its blocker is resolved:
 
-- the Work came from repository state or an explicit ID for the target repository;
-- it was claimed before source changes;
-- only source artifacts allowed by the handoff changed;
-- the report actor, run ID, artifacts, and evidence are valid;
-- verification ran when assigned;
-- review remains with an independent actor.
+```bash
+$CLI --json work unblock <work-id>
+```
 
-Use `$CLI --json validate` to check repository contracts and references when required. For complete commands and schemas, read `docs/public/cli-reference.md` and `docs/public/contracts.md` from the installed Stonvik package.
+Never delete claims or repair state files manually.
+
+## Final discipline
+
+Before stopping, verify that:
+
+- the requested operation was actually executed through the CLI;
+- no unrelated Inbox or Work query was added;
+- captured text remained literal;
+- Work was claimed and its handoff read before source edits;
+- actor and run ID stayed consistent;
+- implementation, verification, review, and shipping remained separate gates;
+- the final response reports actual CLI output, not assumed state.

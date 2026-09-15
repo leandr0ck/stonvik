@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.5] - 2026-09-15
+
+### Changed
+
+- Reworked the Agent Skill for direct multilingual intent-to-CLI routing, minimal command execution, accurate lifecycle commands, and explicit Inbox-versus-Work semantics.
+
 ## [1.1.4] - 2026-09-13
 
 ### Changed
