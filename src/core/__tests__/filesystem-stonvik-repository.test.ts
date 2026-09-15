@@ -58,6 +58,23 @@ describe("FilesystemStonvikRepository", () => {
     await expect(repo.validate()).resolves.toMatchObject({ valid: true });
   });
 
+  it("reads and preserves legacy definition metadata in Inbox items", async () => {
+    const { root, repo } = await tempRepo();
+    const itemPath = path.join(root, "product/inbox/review/20260812T203158Z-ffcd.md");
+    await fs.writeFile(itemPath, `---\nid: inbox-20260812T203158Z-ffcd\nsource: cli\ncreated: 2026-08-12T20:31:58.075Z\nstatus: needs_review\ndefinitionRef: features/definition/example/spec.md\ndefinitionKind: spec\n---\n\n# Legacy item\n`);
+
+    const [item] = await repo.listInbox();
+    expect(item).toMatchObject({
+      id: "inbox-20260812T203158Z-ffcd",
+      definitionRef: "features/definition/example/spec.md",
+      definitionKind: "spec",
+    });
+
+    const restored = await repo.moveReviewToInbox(item!);
+    await expect(fs.readFile(restored.path, "utf8")).resolves.toContain("definitionRef: features/definition/example/spec.md");
+    await expect(repo.listInbox()).resolves.toEqual([expect.objectContaining({ definitionKind: "spec" })]);
+  });
+
   it("creates features and transitions through the default lifecycle", async () => {
     const { root, repo } = await tempRepo();
     const feature = await repo.createFeature({ title: "Add WhatsApp Button", goal: "Add a storefront contact button.", acceptance: ["Button is visible"], verification: { commands: [{ name: "pass", run: "true" }] } });

@@ -1106,6 +1106,8 @@ export class FilesystemStonvikRepository {
 
   private renderInbox(item: InboxItem): string {
     const fm: Record<string, unknown> = { id: item.id, source: item.source, created: item.created, status: item.status };
+    if (item.definitionRef) fm.definitionRef = item.definitionRef;
+    if (item.definitionKind) fm.definitionKind = item.definitionKind;
     if (item.featureRef) fm.featureRef = item.featureRef;
     if (item.clarification) fm.clarification = item.clarification;
     if (item.classification) fm.classification = item.classification;

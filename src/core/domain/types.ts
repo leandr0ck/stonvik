@@ -51,6 +51,10 @@ export interface InboxItem {
   body?: string;
   path: string;
   clarification?: InboxClarification;
+  /** Legacy reference retained while older Inbox files transition. */
+  definitionRef?: string;
+  /** Legacy definition kind retained while older Inbox files transition. */
+  definitionKind?: DefinitionKind;
   featureRef?: string;
   classification?: Classification;
   routingDecision?: RoutingDecision;
